@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-**Versioning note.** Nothing has been released yet. While the version is `0.x`, the config format
+**Versioning note.** While the version is `0.x`, the config format
 and the D-Bus interface may change in a minor release; every such change will be listed under
 **Changed** with a migration note, and an incompatible config will be rejected loudly with that note
 rather than silently reinterpreted. From `1.0.0` on, the config file, the CLI surface and the D-Bus
@@ -13,8 +13,11 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 ## [Unreleased]
 
-Work towards the first release, `0.1.0`. This section describes what that release will contain; no
-tag exists yet.
+Nothing yet.
+
+## [0.1.0] - 2026-07-27
+
+The first release.
 
 ### Added
 
@@ -114,4 +117,5 @@ reasoned about — the notes below record what that verification changed.
 - `TESTING.md` with the manual suspend/resume protocol, including the normative resume case, and an
   explicit account of what CI cannot cover.
 
-[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/commits/main
+[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Eric-Canas/cachyos-idlectl/releases/tag/v0.1.0

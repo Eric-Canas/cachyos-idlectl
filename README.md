@@ -38,11 +38,11 @@ proposal wins, `never` beats everything, an action key a block does not set cont
 that action, and the default over zero true blocks is to do nothing. Order never matters, and there
 is no priority list to get wrong.
 
-> **Status: pre-release, and working.** The daemon, the CLI and the session agent are implemented,
-> and everything below has been exercised on a real CachyOS machine: the eleven facts, the decision
+> **Status: `0.1.0`, and working.** The daemon, the CLI and the session agent are implemented, and
+> everything below has been exercised on a real CachyOS machine: the eleven facts, the decision
 > loop, leases, polkit authorization, the KDE and wlroots blanking backends, and resume detection
-> across a genuine `deep` suspend. There is no tagged release and no AUR package yet, so the install
-> section below is `packaging/install.sh` until there is.
+> across a genuine `deep` suspend. Not yet on the AUR — until it is, build the package from the
+> PKGBUILD (see [Install](#install)) or run `packaging/install.sh`.
 
 ---
 
@@ -534,11 +534,18 @@ not a claim about anybody's memory-safety virtue.
 
 ## Install
 
-### AUR (preferred)
+### The package (preferred)
 
 ```sh
-paru -S idlectl        # or: yay -S idlectl
+makepkg -si            # in a clone of the packaging repository
 ```
+
+The PKGBUILD lives in its own repository, not here — `makepkg` needs `source` to point at a
+published tarball plus a checksum, so a PKGBUILD kept inside the source tree is either
+self-referential or permanently out of date. The same is true of every comparable project surveyed.
+
+It is not on the AUR yet. When it is, the line above becomes `paru -S idlectl` (or `yay -S idlectl`)
+and nothing else changes: same package, same file layout, same two units left disabled.
 
 ```sh
 sudo systemctl enable --now idlepolicyd.service
@@ -555,16 +562,20 @@ sudoedit /etc/idlectl/idlectl.toml     # layer 2, overrides the vendor file
 idlectl check-config
 ```
 
-The PKGBUILD lives in the AUR package repository, not here — `makepkg` needs `source` to point at a
-published tarball plus a checksum, so a PKGBUILD kept inside the source tree is either
-self-referential or permanently out of date. The same is true of every comparable project surveyed.
+### Installer script
 
-### Installer script (planned)
+For a machine without an AUR helper, [`packaging/install.sh`](packaging/install.sh) builds from
+source and lays down the same file layout under `/usr/local`:
 
-For distributions without the AUR there will be an installer script that lays down the same file
-layout the package does and prints an uninstall command. It ships with the first tagged release; it
-does not exist yet, and until it does there is no download to fetch. Distribution packaging remains
-the supported path either way. Until then, build from source.
+```sh
+curl -fsSL https://raw.githubusercontent.com/Eric-Canas/cachyos-idlectl/main/packaging/install.sh | bash
+```
+
+It is the second-choice route on purpose, and it says so: it refuses to run when an AUR helper is
+present, refuses to install over a `pacman`-owned path, never writes to `/etc` and never enables a
+unit. [`packaging/uninstall.sh`](packaging/uninstall.sh) removes exactly what it added. A packaged
+install is owned by `pacman`, upgrades with the system and can be removed completely; this one is
+not, which is fine deliberately and bad by accident.
 
 ### From source
 
