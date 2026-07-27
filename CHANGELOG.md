@@ -15,6 +15,26 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.1.2] - 2026-07-27
+
+### Fixed
+
+- **`idlectl-agent.service` could never start.** The unit set `ProtectHome=yes`, which makes
+  `/home`, `/root` **and `/run/user`** inaccessible and empty. `/run/user` is `XDG_RUNTIME_DIR`,
+  which holds the Wayland socket and the session bus socket — the agent's only two inputs. Every
+  start failed with *"no usable session backend"*, naming *"Could not find wayland compositor"* and
+  X11's *"Authorization required"*, on a machine with a healthy Plasma session. The unit's own
+  comment said the inputs are "sockets in XDG_RUNTIME_DIR" and then hid that directory.
+
+  Now `ProtectHome=read-only`, which keeps what the hardening was for — the agent reads no file
+  under a home directory and can write to none — while leaving the sockets reachable. Bisected with
+  `systemd-run --user`: under `ProtectHome=yes` both `$XDG_RUNTIME_DIR/wayland-0` and
+  `$XDG_RUNTIME_DIR/bus` were denied; under `read-only`, alone and combined with
+  `ProtectSystem=strict`, both were reachable and the agent registered with `can_blank=true`.
+
+  Invisible to every test that ran the binary directly, which is all of them. `TESTING.md` gains a
+  step 0a that enables the packaged units and fails on exactly this.
+
 ## [0.1.1] - 2026-07-27
 
 Found by packaging `0.1.0` and installing it, rather than by reading the code.
@@ -142,6 +162,7 @@ reasoned about — the notes below record what that verification changed.
 - `TESTING.md` with the manual suspend/resume protocol, including the normative resume case, and an
   explicit account of what CI cannot cover.
 
-[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Eric-Canas/cachyos-idlectl/releases/tag/v0.1.0

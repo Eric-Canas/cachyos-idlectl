@@ -108,11 +108,25 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 UMask=0077
 
-# NOT relaxed. The agent reads no file under any home directory: its two inputs are a
-# compositor protocol and an X server extension, both reached over sockets in
-# XDG_RUNTIME_DIR. If a future version needs to read something under /home, this line
-# is the deliberate obstacle it has to argue past.
-ProtectHome=yes
+# read-only, NOT yes, and the difference is the whole unit working or not working.
+#
+# `ProtectHome=yes` makes three paths inaccessible and empty: /home, /root and
+# **/run/user**. That third one is XDG_RUNTIME_DIR, which holds the Wayland socket and
+# the session bus socket -- the agent's only two inputs. So `yes` does not harden this
+# service, it makes it impossible: it failed every start with "Could not find wayland
+# compositor" and "Authorization required" for X11, on a machine with a perfectly
+# healthy Plasma session.
+#
+# Measured, by bisecting the sandbox with systemd-run --user: with ProtectHome=yes both
+# $XDG_RUNTIME_DIR/wayland-0 and $XDG_RUNTIME_DIR/bus were denied; with
+# ProtectHome=read-only, alone and combined with ProtectSystem=strict, both were
+# reachable and the agent registered with can_blank=true. Only ever caught by installing
+# the package and enabling the unit -- running the binary by hand exercises none of this.
+#
+# read-only still gives what was wanted: the agent reads no file under any home directory
+# and cannot write to one. A future version that needs to write under /home has to argue
+# past this line.
+ProtectHome=read-only
 
 # NOT relaxed either, for the same reason: the agent inspects no process but its own.
 # Process inspection lives in the daemon, which is privileged and does not have to

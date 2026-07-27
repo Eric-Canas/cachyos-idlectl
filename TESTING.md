@@ -171,6 +171,34 @@ Note the shape:
 Record, for each test: date, machine, kernel, session type (`echo $XDG_SESSION_TYPE`), desktop
 environment and version, `idlectl --version`, and the observed result. Paste the record into the PR.
 
+### 0a. The packaged units actually start
+
+Do this from the **installed package**, with `systemctl`, before anything else. Running the three
+binaries by hand exercises none of the unit files, and the unit files are where a sandbox directive
+can make a program that works perfectly fail every start.
+
+```sh
+sudo systemctl enable --now idlepolicyd.service
+systemctl --user enable --now idlectl-agent.service
+systemctl is-active idlepolicyd.service
+systemctl --user is-active idlectl-agent.service
+```
+
+**Expect:** both `active`, and the agent's first journal line naming a backend, e.g.
+`session backend ready backend="wayland (KDE), ext-idle-notify-v1, org_kde_kwin_dpms"`.
+
+**Fail if:** the agent reports *"no usable session backend"* on a machine with a running compositor.
+That is a sandbox fault, not a protocol fault: bisect it with
+
+```sh
+systemd-run --user --wait --pipe -p ProtectHome=yes \
+  /bin/sh -c 'ls $XDG_RUNTIME_DIR/wayland-0 $XDG_RUNTIME_DIR/bus'
+```
+
+`ProtectHome=yes` makes `/home`, `/root` **and `/run/user`** inaccessible, and `/run/user` is where
+both of the agent's sockets live. This shipped broken in 0.1.1 and was invisible to every test that
+started the binary directly.
+
 ### 0. Baseline
 
 ```sh
