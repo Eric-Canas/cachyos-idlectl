@@ -15,14 +15,36 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 ### Known
 
-- **`steam_game_running` and `steam_downloading` report `unavailable` on a normal install.** The
-  daemon runs as root with `CapabilityBoundingSet=` empty, and Arch creates home directories `0700`,
-  so it cannot traverse `/home/<user>/` to find `.local/share/Steam` — measured: the same `ls` finds
-  it with capabilities and returns *"No such file or directory"* without them. `steam_root` in the
-  configuration does not help, because the obstacle is the home directory rather than the path. The
-  facts degrade correctly (`unavailable`, blocks inert, never a false veto), but the detector cannot
-  work as placed. The fix is a design choice — grant `CAP_DAC_READ_SEARCH`, or move the fact to the
-  session agent the way `media_playing` already is — and is not made here.
+- **The DRM `fdinfo` GPU source sees nothing outside the daemon's own processes.**
+  `/proc/<pid>/fdinfo` is mode `0555` and still gated by `ptrace_may_access`, so reading another
+  user's requires `CAP_SYS_PTRACE` — which a daemon that can turn a machine off is not getting, since
+  it also grants reading any process's memory. On NVIDIA hardware `nvidia-smi` covers the same ground
+  and nothing is lost; on an AMD or Intel machine, where `fdinfo` is the only source, both GPU facts
+  are blind. The fix is to have the session agent read its own processes' `fdinfo` and report them,
+  the way `media_playing` already works, and it is not done here.
+
+## [0.1.4] - 2026-07-27
+
+### Fixed
+
+- **The Steam detectors could not work on any ordinary install.** `useradd` creates home directories
+  mode `0700`, and the daemon ran with `CapabilityBoundingSet=` empty, so root could not traverse
+  `/home/<user>/` to reach `$HOME/.local/share/Steam`. Measured on a machine where Steam was plainly
+  installed and a game was running: the same `ls -d /home/*/.local/share/Steam` returns the path with
+  the capability and *"No such file or directory"* without it. `steam_root` in the configuration was
+  no escape, because the obstacle is the home directory rather than the path.
+
+  The cost was larger than two facts reading `unavailable`. Attribution of GPU memory to a game
+  requires the Steam fact to be true, so a game holding 7280 MiB was classified as `gpu_busy_other`
+  — worth twenty minutes — instead of `gpu_busy_game`, worth two hours. And `steam_downloading`, the
+  veto that lets a machine finish a download overnight, could never be true at all.
+
+  Now `CapabilityBoundingSet=CAP_DAC_READ_SEARCH` plus the matching `AmbientCapabilities=`. Read and
+  search only, never `CAP_DAC_OVERRIDE`; combined with `ProtectHome=read-only` a write to a home is
+  refused by the mount before permissions are consulted — measured: *"Read-only file system"*.
+  Verified with a real game running: `steam_game_running` true, `steam_downloading` false with the
+  staging directory named, `gpu_busy_game` true naming the process and its 7280 MiB, and
+  `gpu_busy_other` false.
 
 ## [0.1.3] - 2026-07-27
 
@@ -191,7 +213,8 @@ reasoned about — the notes below record what that verification changed.
 - `TESTING.md` with the manual suspend/resume protocol, including the normative resume case, and an
   explicit account of what CI cannot cover.
 
-[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.0...v0.1.1

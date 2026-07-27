@@ -100,7 +100,35 @@ Environment=IDLECTL_LOG=info
 # agent is present, screen_off is unavailable as an action and is reported as such.
 # ---------------------------------------------------------------------------------
 NoNewPrivileges=yes
-CapabilityBoundingSet=
+# ONE capability, and it is read-only.
+#
+# The set was empty, which sounded right and quietly broke the Steam detectors on every
+# ordinary install. `useradd` creates home directories mode 0700, so root without
+# CAP_DAC_READ_SEARCH cannot traverse /home/<user>/ at all -- and the Steam root lives at
+# $HOME/.local/share/Steam. Measured on a machine where Steam was plainly installed and a
+# game was running: the same `ls -d /home/*/.local/share/Steam` returns the path with the
+# capability and "No such file or directory" without it. `steam_root` in the
+# configuration is no escape either, because the obstacle is the home directory rather
+# than the path.
+#
+# What that cost was larger than two facts reading `unavailable`. Attribution of GPU
+# memory to a game requires the Steam fact to be true (facts/gpu.rs), so a game holding
+# 7218 MiB was classified as `gpu_busy_other` -- worth 20 minutes -- rather than
+# `gpu_busy_game`, worth two hours. And `steam_downloading`, the veto that lets a machine
+# finish a download overnight, could never be true.
+#
+# CAP_DAC_READ_SEARCH and NOT CAP_DAC_OVERRIDE: it bypasses read and search permission
+# checks only. Combined with ProtectHome=read-only below, writing to a home is refused by
+# the mount before permissions are even consulted -- measured: "Read-only file system".
+#
+# CAP_SYS_PTRACE is deliberately NOT here, even though it is what the DRM `fdinfo` source
+# would need to read another user's /proc/<pid>/fdinfo (that path is mode 0555 and still
+# gated by ptrace_may_access, so the capability above does not open it). Granting a power
+# daemon the ability to read any process's memory to attribute video RAM is not a trade
+# worth making; the session agent reads its own processes' fdinfo instead, with no
+# capability at all.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_DAC_READ_SEARCH
 AmbientCapabilities=
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
