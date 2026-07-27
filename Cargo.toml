@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 # MSRV. Driven by zbus 5.x, which declares rust-version = "1.87" and edition 2024.
 #
@@ -28,8 +28,8 @@ categories = ["command-line-utilities", "os::linux-apis"]
 
 [workspace.dependencies]
 # --- workspace-internal ---------------------------------------------------------
-idlectl-policy = { path = "crates/idlectl-policy", version = "0.4.0" }
-idlectl-config = { path = "crates/idlectl-config", version = "0.4.0" }
+idlectl-policy = { path = "crates/idlectl-policy", version = "0.4.1" }
+idlectl-config = { path = "crates/idlectl-config", version = "0.4.1" }
 
 # --- pure data ------------------------------------------------------------------
 # serde and toml perform no I/O whatsoever: they turn &str into structs. They are the

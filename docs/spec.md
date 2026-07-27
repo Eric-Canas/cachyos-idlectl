@@ -702,6 +702,22 @@ the source.
 permissive default would silently disable this veto for everybody who had not changed the unit —
 which is everybody, on day one.)*
 
+**[FACT-45]** A **refused connection** to `counters_url` MUST be read as FALSE, not
+`INDETERMINATE`: nothing is listening on that port, so no work is in flight anywhere on it. Every
+other failure — a timeout, a reply that cannot be parsed, a non-200 status — remains
+`INDETERMINATE` under [FACT-34].
+
+*(Rationale: [FACT-34] is about a service that is **up** while its counter endpoint is off, where
+the daemon genuinely cannot tell whether work is in flight. A refused connection answers the
+question outright. Without the distinction the fact is unusable for the very service it was written
+for: a model server started on demand and stopped when idle is absent most of the time, so every
+evaluation would read `INDETERMINATE` and veto every sleep action for as long as the machine is up.
+The only safe configuration would then be not to configure it — and the veto it exists to provide
+would never run either. Measured: with `counters_url` pointing at a stopped server, the machine held
+`suspend` at `+infinity` indefinitely. Prior art in the system this was extracted from, which asked
+whether the unit was active before consulting its counters, and raised no veto at all when it was
+not.)*
+
 **[FACT-35]** The first sample after daemon start MUST be treated as "in use". *(Rationale: at
 first sample nothing is known about the past. The idle countdown starts then, rather than assuming
 the service has been idle forever.)*

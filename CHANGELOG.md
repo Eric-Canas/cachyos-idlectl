@@ -15,6 +15,22 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.4.1] - 2026-07-28
+
+### Fixed
+
+- **`local_service_busy` no longer treats a stopped service as doubt.** Any failure to read
+  `counters_url` produced `INDETERMINATE`, including a refused connection — so pointing the fact at
+  a service that is started on demand and stops itself when idle vetoed every sleep action for as
+  long as the machine was up. The fact was unusable for exactly the kind of service it was written
+  for, and the only safe setting was to leave it unconfigured, which also means never getting the
+  veto it exists to provide.
+
+  A refused connection now reads FALSE: nothing is listening, so no work is in flight anywhere on
+  that port. Everything else — a timeout, an unparseable reply, a non-200 — stays `INDETERMINATE`
+  under [FACT-34], which is about a service that is *up* while its counter endpoint is off, where
+  the daemon really cannot tell. New: [FACT-45].
+
 ## [0.4.0] - 2026-07-28
 
 Both changes here come from one question: can a machine running this do everything the system it

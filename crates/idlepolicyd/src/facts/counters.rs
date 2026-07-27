@@ -69,9 +69,29 @@ impl Sampler {
 
         let body = match fetch(&url).await {
             Ok(body) => body,
-            // [FACT-34]. Not FALSE. The service being unreachable is precisely when the
-            // daemon cannot tell whether work is in flight.
-            Err(err) => return Reading::doubt(format!("{url} could not be read: {err}")),
+            // Nothing is listening on that port. A service that is not running is not a
+            // service in use, and this is knowledge rather than doubt.
+            //
+            // This is NOT a hole in [FACT-34], which is about a service that IS up while
+            // its counter endpoint is off -- there the daemon genuinely cannot tell whether
+            // work is in flight, and doubt is the only honest answer. A refused connection
+            // answers the question outright: nothing is being served, by anything, on that
+            // port.
+            //
+            // The distinction is what makes the fact usable for the service it was written
+            // for. A model server started on demand and stopped when idle is absent most of
+            // the time; treating absence as doubt would veto every sleep action for as long
+            // as the machine is up, so the only safe configuration would be not to configure
+            // it at all -- and then the veto it exists to provide never runs either.
+            Err(FetchError::NotListening) => {
+                self.previous = None;
+                self.last_movement = None;
+                return Reading::no(format!("nothing is listening on {url}"));
+            }
+            // [FACT-34]. Not FALSE: something is there and it will not tell us.
+            Err(FetchError::Unreadable(err)) => {
+                return Reading::doubt(format!("{url} could not be read: {err}"));
+            }
         };
 
         let Some(reading) = parse(&body) else {
@@ -213,13 +233,35 @@ fn parse(body: &str) -> Option<Sample> {
 /// is deciding about — so a TLS stack would add a large dependency tree, a certificate
 /// trust decision and an attack surface to fetch a page from `127.0.0.1`. An `https://`
 /// URL is refused with a message that says so rather than silently failing.
-async fn fetch(url: &str) -> Result<String, String> {
+/// Why a counters endpoint could not be read.
+///
+/// Two variants and not a string, because the difference between them decides whether the
+/// machine may sleep tonight.
+#[derive(Debug)]
+enum FetchError {
+    /// The connection was refused: nothing holds that port. The service is not running.
+    NotListening,
+    /// Anything else -- a timeout, a hung accept, a reply this detector cannot parse.
+    /// Something is there and the daemon cannot tell what it is doing.
+    Unreadable(String),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::NotListening => f.write_str("nothing is listening"),
+            FetchError::Unreadable(why) => f.write_str(why),
+        }
+    }
+}
+
+async fn fetch(url: &str) -> Result<String, FetchError> {
     let rest = url.strip_prefix("http://").ok_or_else(|| {
-        if url.starts_with("https://") {
+        FetchError::Unreadable(if url.starts_with("https://") {
             "https is not supported: counters_url is expected to be a loopback endpoint".to_owned()
         } else {
             format!("not an http:// URL: {url}")
-        }
+        })
     })?;
 
     let (authority, path) = match rest.find('/') {
@@ -240,13 +282,20 @@ async fn fetch(url: &str) -> Result<String, String> {
     let work = async {
         use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
 
-        let mut stream = async_net::TcpStream::connect(&addr)
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut stream = async_net::TcpStream::connect(&addr).await.map_err(|e| {
+            // Distinguished from every other failure because it is the only one that says
+            // something about the SERVICE rather than about our ability to ask. See
+            // `FetchError` and the [FACT-34] carve-out in `sample`.
+            if e.kind() == std::io::ErrorKind::ConnectionRefused {
+                FetchError::NotListening
+            } else {
+                FetchError::Unreadable(e.to_string())
+            }
+        })?;
         stream
             .write_all(request.as_bytes())
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| FetchError::Unreadable(e.to_string()))?;
 
         // Bounded. A service that streams megabytes at this endpoint is misconfigured, and
         // reading it all into the daemon that decides whether the machine may sleep is not
@@ -254,13 +303,16 @@ async fn fetch(url: &str) -> Result<String, String> {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 8192];
         loop {
-            let n = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
+            let n = stream
+                .read(&mut chunk)
+                .await
+                .map_err(|e| FetchError::Unreadable(e.to_string()))?;
             if n == 0 {
                 break;
             }
             buf.extend_from_slice(&chunk[..n]);
             if buf.len() > 4 * 1024 * 1024 {
-                return Err("response exceeded 4 MiB".to_owned());
+                return Err(FetchError::Unreadable("response exceeded 4 MiB".to_owned()));
             }
         }
         Ok(String::from_utf8_lossy(&buf).into_owned())
@@ -268,17 +320,20 @@ async fn fetch(url: &str) -> Result<String, String> {
 
     let timeout = async {
         async_io::Timer::after(TIMEOUT).await;
-        Err(format!("no answer in {}s", TIMEOUT.as_secs()))
+        Err(FetchError::Unreadable(format!(
+            "no answer in {}s",
+            TIMEOUT.as_secs()
+        )))
     };
 
     let response = futures_lite::future::or(work, timeout).await?;
 
     let (head, body) = response
         .split_once("\r\n\r\n")
-        .ok_or_else(|| "malformed HTTP response".to_owned())?;
+        .ok_or_else(|| FetchError::Unreadable("malformed HTTP response".to_owned()))?;
     let status = head.lines().next().unwrap_or_default();
     if !status.contains(" 200") {
-        return Err(format!("HTTP status: {status}"));
+        return Err(FetchError::Unreadable(format!("HTTP status: {status}")));
     }
     Ok(body.to_owned())
 }
@@ -338,12 +393,24 @@ svc_queue_depth 7
     #[test]
     fn https_is_refused_with_a_reason() {
         let err = futures_lite::future::block_on(fetch("https://localhost/metrics")).unwrap_err();
-        assert!(err.contains("https is not supported"), "{err}");
+        assert!(err.to_string().contains("https is not supported"), "{err}");
+    }
+
+    /// The distinction the whole carve-out rests on: a port nobody is listening on is a
+    /// service that is not running, and that is an answer rather than a doubt. Port 1 is
+    /// used because nothing sane binds it, so the connect is refused rather than accepted.
+    #[test]
+    fn a_refused_connection_is_reported_as_not_listening() {
+        let err = futures_lite::future::block_on(fetch("http://127.0.0.1:1/metrics")).unwrap_err();
+        assert!(
+            matches!(err, FetchError::NotListening),
+            "expected NotListening, got {err}"
+        );
     }
 
     #[test]
     fn a_non_http_url_is_refused() {
         let err = futures_lite::future::block_on(fetch("/var/run/thing.sock")).unwrap_err();
-        assert!(err.contains("not an http:// URL"), "{err}");
+        assert!(err.to_string().contains("not an http:// URL"), "{err}");
     }
 }
