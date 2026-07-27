@@ -58,4 +58,15 @@ pub trait Backend: Send + Sync {
 
     /// What this backend is, for the journal and for `doctor`.
     fn describe(&self) -> String;
+
+    /// Records what this backend knows, so the next instance of the agent can carry it over.
+    ///
+    /// Called on the heartbeat rather than on every transition, so that all of the file I/O
+    /// happens on one thread and a compositor event stays a lock and an assignment.
+    ///
+    /// The default does nothing, which is the right answer for any backend that can ask the
+    /// display server how long the seat has been idle. Only Wayland needs it: see
+    /// [`crate::lastinput`] for why `ext-idle-notify-v1` leaves a hole that `MIT-SCREEN-SAVER`
+    /// does not.
+    fn persist(&self) {}
 }

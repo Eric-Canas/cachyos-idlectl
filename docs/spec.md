@@ -313,6 +313,43 @@ asleep with the game running" are indistinguishable in process state and identic
 `condition` clock; only human input separates them. A 2 h timeout on the `condition` clock
 suspends the machine in the middle of a 2 h session.)*
 
+**[CLK-13]** An agent MUST measure idle time on a clock that keeps counting while the machine is
+suspended. *(Rationale: the daemon anchors the origin at `now - idle`, both on `CLOCK_BOOTTIME`. An
+agent whose stopwatch is `CLOCK_MONOTONIC` puts the two halves of that subtraction on two different
+timelines, and the error is exactly the time spent asleep. Measured on a machine up for 7 h 24 m of
+which 2 h 16 m were suspended: `CLOCK_BOOTTIME` 26649 s against `CLOCK_MONOTONIC` 18471 s, a
+discrepancy of 8178 s. The daemon then recorded a seat nobody had touched in seventy minutes as
+"input in session 1 3m ago", because the stopwatch had been frozen for the whole sleep. This is
+also what makes the `after_resume` settle floor of [CLK-8] meaningful: it exists to defeat a large
+accumulated idle time, which presupposes that idle time accumulates across a sleep.)*
+
+**[CLK-14]** An agent whose protocol reports only **transitions** MUST NOT report an idle time of
+zero before it has observed one. Until a transition arrives, or an instant is carried over under
+[CLK-15], it MUST report the idle time as unknown.
+
+*(Rationale: `ext-idle-notify-v1` sends `idled` and `resumed` and offers no request for the current
+idle time, so an agent that has just started has observed nothing. Reporting zero asserts that
+input just happened, which is an observation nobody made, and it is the direction that keeps a
+machine awake. Unknown is the state [CLK-5] and [HUM-4] already define, and it resolves within one
+notification timeout. Measured: KWin under Wayland answers
+`org.freedesktop.ScreenSaver.GetSessionIdleTime` with `not supported on this platform`, so the
+information cannot be recovered by asking either. X11 needs none of this, because
+`MIT-SCREEN-SAVER` exposes the counter itself.)*
+
+**[CLK-15]** An agent SHOULD carry its last-input instant across its own restarts, in a runtime
+location that survives suspend and is cleared by a cold boot ([CLK-9]). It MUST NOT adopt a carried
+instant when no agent was watching the seat for longer than a bounded gap, and MUST discard one the
+moment the compositor reports real input.
+
+*(Rationale: without this, restarting the agent restarts every countdown measured from the
+human-input clock — the outcome [CLK-7] forbids for the daemon, arriving by way of the agent
+instead. A package upgrade is enough to cause it. Measured with nobody in the room: restarting the
+agent moved the daemon's `human_input` origin from +25823 s to +26299 s, exactly the uptime at the
+restart, while an independent `swayidle` timestamp watching the same seat did not move at all. The
+bound is required because input during the gap is unobservable by construction: nothing was
+watching. At the sizes involved — a sub-second restart from an upgrade, against timeouts of tens of
+minutes — the residual error is at most the gap. Mandatory vector: [TEST-25].)*
+
 ### 4.3 Human-input clock never touched this boot
 
 **[CLK-7]** When no human input has been observed since boot **and the input path is otherwise
@@ -1878,6 +1915,13 @@ poweroff = "8h"` and both deadlines in the past, the evaluation issues `suspend`
 `poweroff`, in that evaluation or in any later one while the machine remains awake with the same
 origins. `screen_off`, if also due, MAY be applied in the same evaluation and MUST NOT suppress the
 `suspend`. ([ACT-6], [ACT-7], [ACT-7b])
+
+**[TEST-25] — restarting the agent does not restart the countdown.** With a seat that has been idle
+for one hour and `[while.always] suspend = "30m"`, restarting the session agent MUST leave
+`origin(human_input)` where it was, and `suspend` MUST stay due at its original deadline. An
+implementation that anchors the origin at the restart fails this. Restarting the agent after a gap
+longer than the adoption bound MUST instead report `human_active` as `INDETERMINATE` until the
+first transition — never as active. ([CLK-14], [CLK-15])
 
 ### 14.2 What conformance does not cover
 

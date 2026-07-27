@@ -15,6 +15,49 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.3.0] - 2026-07-28
+
+Both entries here are one defect seen twice: the agent's idle clock was being reset by things
+that are not a human. Found by running the daemon in `--dry-run` alongside an existing idle
+watcher on the same machine and comparing what each decided. Over that window the daemon
+proposed 47 actions, all of them `screen_off`, and never once proposed a sleep, while the other
+watcher suspended the machine 13 times on the same evidence.
+
+### Fixed
+
+- **Restarting the session agent no longer restarts every countdown measured from the
+  human-input clock.** The agent reported "idle for zero seconds" before it had observed a
+  single transition, which states that input just happened. Measured with nobody in the room:
+  restarting the agent moved the daemon's `human_input` origin from +25823 s to +26299 s —
+  exactly the uptime at the restart — while an independent `swayidle` timestamp watching the
+  same seat did not move at all. A package upgrade was enough to trigger it.
+
+  `ext-idle-notify-v1` reports transitions and has no request for the current idle time, and the
+  compositor will not fill the gap either: KWin under Wayland answers
+  `org.freedesktop.ScreenSaver.GetSessionIdleTime` with `not supported on this platform`. So the
+  agent now carries its last-input instant across its own restarts in `$XDG_RUNTIME_DIR`, which
+  survives suspend and is cleared by a cold boot, and refuses to adopt it when nothing was
+  watching the seat for more than 90 s. Where there is nothing credible to carry, it reports
+  unknown rather than zero — the state that vetoes sleep — until the first transition arrives.
+  New: [CLK-14], [CLK-15], [TEST-25].
+
+- **The agent's idle time is now measured on `CLOCK_BOOTTIME`.** It was `std::time::Instant`,
+  which is `CLOCK_MONOTONIC` and stops while the machine is suspended, while the daemon anchors
+  origins on `CLOCK_BOOTTIME`. The two halves of one subtraction were on different timelines.
+  Measured on a machine up for 7 h 24 m of which 2 h 16 m were spent suspended: `CLOCK_BOOTTIME`
+  26649 s against `CLOCK_MONOTONIC` 18471 s, a gap of 8178 s. The visible symptom was the daemon
+  recording a seat nobody had touched in seventy minutes as "input in session 1 3m ago" after
+  every resume, and holding `suspend` at `never` for the following five minutes. New: [CLK-13].
+
+The X11 backend needed neither fix: `MIT-SCREEN-SAVER` exposes the idle counter itself, so there
+is nothing to reconstruct and nothing to carry.
+
+### Changed
+
+- `idlectl-agent` now depends on `idlectl-policy` for `BootInstant` and on `rustix` for one
+  `clock_gettime` call. It still contains no policy: the type is shared so that the instant the
+  agent reports and the origin the daemon computes cannot drift onto different clocks.
+
 ## [0.2.1] - 2026-07-27
 
 ### Fixed

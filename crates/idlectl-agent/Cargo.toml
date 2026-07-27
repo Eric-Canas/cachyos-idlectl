@@ -14,7 +14,14 @@ path = "src/main.rs"
 # No idlectl-config dependency on purpose: the agent has no policy and no configuration of
 # its own. It reports what it can see and never decides anything. Everything that can turn
 # a machine off lives in idlepolicyd.
+#
+# idlectl-policy IS a dependency, but only for `BootInstant`. The agent runs no policy; it
+# needs the type because the instant it reports has to be on the same clock the daemon
+# anchors deadlines to, and having two crates each define "a point on CLOCK_BOOTTIME" is
+# how they drift apart. rustix is what reads that clock, as it does in the daemon.
 [dependencies]
+idlectl-policy = { workspace = true }
+rustix = { workspace = true }
 zbus = { workspace = true }
 async-io = { workspace = true }
 async-channel = { workspace = true }

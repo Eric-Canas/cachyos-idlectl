@@ -26,6 +26,19 @@
 //! goes stale during exactly the activity it is supposed to detect, because the compositor
 //! emits nothing while a controller is being held.
 //!
+//! # What transitions cannot tell you, and what to do about it
+//!
+//! Both events describe a *change*. Neither answers "how long has this seat been idle", and
+//! the protocol has no request that does. An agent that has just started has therefore
+//! observed nothing, and the compositor will not tell it what it missed: KWin answers
+//! `org.freedesktop.ScreenSaver.GetSessionIdleTime` with `not supported on this platform`.
+//!
+//! So the state here is not "when did `idled` arrive" but "where was the last input", on
+//! `CLOCK_BOOTTIME`, in one of three states -- and the instant is handed to the next
+//! instance of this agent through a runtime file so that restarting it does not restart
+//! every countdown measured from it. [`crate::lastinput`] is that mechanism and carries the
+//! measurements that made it necessary.
+//!
 //! # Two blanking protocols, because one is not enough
 //!
 //! `wlr-output-power-management-v1` is the wlroots one: sway, Hyprland, wayfire, labwc.
@@ -40,7 +53,10 @@
 //! done nothing at all on the majority target.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use idlectl_policy::BootInstant;
+use tracing::info;
 
 use wayland_client::protocol::{wl_output, wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, QueueHandle, delegate_noop};
@@ -58,6 +74,7 @@ use wayland_protocols_wlr::output_power_management::v1::client::{
 };
 
 use crate::backend::{Backend, Idle};
+use crate::clock;
 
 /// The idle-notification timeout.
 ///
@@ -65,13 +82,54 @@ use crate::backend::{Backend, Idle};
 /// daemon owns `min_idle` and every timeout that matters. Ten seconds means the agent
 /// learns a session went idle within ten seconds of it happening and then computes the
 /// exact idle time from the transition instant.
-const NOTIFY_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const NOTIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What this agent knows about the last time somebody touched the seat.
+///
+/// Three states rather than an `Option<BootInstant>`, because "I have not seen a transition
+/// yet" and "the seat was last touched at T" are different claims and only one of them is
+/// an observation. Collapsing the first into "idle for zero seconds" is what made a package
+/// upgrade hand the machine a fresh countdown; see [`crate::lastinput`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tracked {
+    /// No transition seen since this agent started, and nothing credible to carry over.
+    /// Reported as [`Idle::Unknown`], which vetoes every sleep action until the compositor
+    /// says something -- at most [`NOTIFY_TIMEOUT`] later.
+    Unknown,
+    /// Carried over from the previous instance and not yet confirmed by a transition.
+    /// Believed, but discarded the moment the compositor contradicts it.
+    Carried(BootInstant),
+    /// The instant of the most recent real input, observed by this instance.
+    Observed(BootInstant),
+}
+
+/// Where the last input was, given that `idled` has just arrived at `at`.
+///
+/// Split out from the event handler so the rule can be tested without a compositor, because
+/// the interesting case is not the arithmetic but which of two answers wins.
+fn idled(tracked: Tracked, at: BootInstant) -> Tracked {
+    // `idled` fires exactly NOTIFY_TIMEOUT after the last input, so that is where the input
+    // was -- an offset, not an estimate.
+    let observed = at.saturating_sub(NOTIFY_TIMEOUT);
+    match tracked {
+        // Confirmation rather than news. The seat was already quiet when this agent started
+        // and it is quiet now, so the carried instant is the older and better answer;
+        // taking `observed` here would restart the countdown at the moment of the restart,
+        // which is the entire failure this mechanism exists to prevent. The compositor
+        // cannot contradict it: `idled` means there was no input in the window that ended
+        // now, so the true last input is at or before `observed`.
+        Tracked::Carried(carried) => Tracked::Observed(carried.min(observed)),
+        // `idled` never arrives twice in a row -- the compositor sends `resumed` in
+        // between -- so in these states `observed` is the newest thing known and correct.
+        Tracked::Unknown | Tracked::Observed(_) => Tracked::Observed(observed),
+    }
+}
 
 /// Shared between the Wayland thread and the async main loop.
 #[derive(Debug)]
 struct Shared {
-    /// When `idled` arrived, or [`None`] while the session is active.
-    idled_at: Option<Instant>,
+    /// What is known about the last input, on `CLOCK_BOOTTIME`.
+    tracked: Tracked,
     /// Set when the connection dies. Everything after that is unknown, not idle.
     lost: bool,
 }
@@ -119,9 +177,21 @@ impl WaylandBackend {
         let handle = queue.handle();
         display.get_registry(&handle, ());
 
+        // What the previous instance of this agent last saw, if it was still writing it
+        // moments ago. Believed only until the compositor's first transition either
+        // confirms it (`idled`: the seat is still quiet) or overrules it (`resumed`:
+        // somebody is here now).
+        let carried = match crate::lastinput::load(clock::now()) {
+            Some(instant) => {
+                info!("carried the last input over from the previous agent");
+                Tracked::Carried(instant)
+            }
+            None => Tracked::Unknown,
+        };
+
         let mut state = State {
             shared: Arc::new(Mutex::new(Shared {
-                idled_at: None,
+                tracked: carried,
                 lost: false,
             })),
             seat: None,
@@ -262,11 +332,14 @@ impl Backend for WaylandBackend {
         if shared.lost {
             return Idle::Unknown;
         }
-        match shared.idled_at {
-            // `idled` fired exactly NOTIFY_TIMEOUT after the last input, so the elapsed
-            // time since it plus that timeout is the exact idle time -- not an estimate.
-            Some(at) => Idle::For(at.elapsed() + NOTIFY_TIMEOUT),
-            None => Idle::For(Duration::ZERO),
+        match shared.tracked {
+            // Not an estimate: every path that sets one of these instants derives it from a
+            // transition whose offset from the real input is exactly known.
+            Tracked::Carried(at) | Tracked::Observed(at) => Idle::For(clock::now().since(at)),
+            // Nothing has been observed and there was nothing to carry over. Saying "idle
+            // for zero" here would be an observation nobody made, and the one that keeps a
+            // machine awake; see [CLK-4] and the rationale under [CLK-7].
+            Tracked::Unknown => Idle::Unknown,
         }
     }
 
@@ -280,6 +353,22 @@ impl Backend for WaylandBackend {
 
     fn can_blank(&self) -> bool {
         self.via != BlankVia::None
+    }
+
+    fn persist(&self) {
+        let Ok(shared) = self.shared.lock() else {
+            return;
+        };
+        // A lost connection is not evidence about the seat, and neither is Unknown. Writing
+        // either would refresh the timestamp that decides whether the next instance may
+        // carry anything over, and would turn "nobody was watching" into "watched, saw
+        // nothing" -- which is the one claim this agent must never make.
+        if shared.lost {
+            return;
+        }
+        if let Tracked::Carried(at) | Tracked::Observed(at) = shared.tracked {
+            crate::lastinput::store(at, clock::now());
+        }
     }
 
     fn describe(&self) -> String {
@@ -365,10 +454,12 @@ impl Dispatch<ExtIdleNotificationV1, ()> for State {
         };
         match event {
             ext_idle_notification_v1::Event::Idled => {
-                shared.idled_at = Some(Instant::now());
+                shared.tracked = idled(shared.tracked, clock::now());
             }
+            // Input, right now. This is the one event that is a direct observation of a
+            // human, so it overrules anything carried over from the previous instance.
             ext_idle_notification_v1::Event::Resumed => {
-                shared.idled_at = None;
+                shared.tracked = Tracked::Observed(clock::now());
             }
             _ => {}
         }
@@ -403,3 +494,47 @@ delegate_noop!(State: ExtIdleNotifierV1);
 delegate_noop!(State: ZwlrOutputPowerManagerV1);
 delegate_noop!(State: ignore ZwlrOutputPowerV1);
 delegate_noop!(State: OrgKdeKwinDpmsManager);
+
+#[cfg(test)]
+mod tests {
+    use super::{NOTIFY_TIMEOUT, Tracked, idled};
+    use idlectl_policy::BootInstant;
+
+    /// The regression this whole mechanism exists for. An agent that started while the seat
+    /// was already quiet must not conclude that the last input was ten seconds ago.
+    ///
+    /// Measured before the fix, with nobody in the room: restarting the agent moved the
+    /// daemon's `human_input` origin from +25823 s to +26299 s, which was exactly the
+    /// uptime at the restart.
+    #[test]
+    fn a_carried_instant_survives_the_first_idled() {
+        let carried = BootInstant::from_secs(1000);
+        let after = idled(Tracked::Carried(carried), BootInstant::from_secs(9000));
+        assert_eq!(after, Tracked::Observed(carried));
+    }
+
+    #[test]
+    fn without_anything_carried_the_input_was_one_timeout_ago() {
+        let at = BootInstant::from_secs(9000);
+        let after = idled(Tracked::Unknown, at);
+        assert_eq!(after, Tracked::Observed(at.saturating_sub(NOTIFY_TIMEOUT)));
+    }
+
+    /// After a `resumed`, the next `idled` is genuine news and moves the instant forward.
+    #[test]
+    fn an_observed_instant_moves_forward_on_the_next_idled() {
+        let at = BootInstant::from_secs(9000);
+        let after = idled(Tracked::Observed(BootInstant::from_secs(500)), at);
+        assert_eq!(after, Tracked::Observed(at.saturating_sub(NOTIFY_TIMEOUT)));
+    }
+
+    /// Defensive: a carried instant newer than the transition allows cannot happen -- the
+    /// compositor would not have sent `idled` -- but if it ever did, the older answer wins
+    /// rather than the machine gaining idle time it never had.
+    #[test]
+    fn the_older_answer_wins() {
+        let at = BootInstant::from_secs(9000);
+        let after = idled(Tracked::Carried(BootInstant::from_secs(8999)), at);
+        assert_eq!(after, Tracked::Observed(at.saturating_sub(NOTIFY_TIMEOUT)));
+    }
+}

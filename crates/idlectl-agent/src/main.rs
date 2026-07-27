@@ -54,7 +54,9 @@
 #![forbid(unsafe_code)]
 
 mod backend;
+mod clock;
 mod gpu;
+mod lastinput;
 mod mpris;
 mod wayland;
 mod x11;
@@ -279,6 +281,10 @@ async fn serve(backend: Arc<dyn Backend>) -> Result<()> {
     let mut last_state: Option<bool> = None;
     loop {
         let idle = backend.idle();
+        // Before the report, not after: if this process is about to be replaced by a
+        // package upgrade, what matters is that the successor finds the instant that was
+        // true when this one last looked.
+        backend.persist();
         let (media, media_detail) = mpris::read().await;
         // Sampled on the heartbeat like everything else here, and cheap for the same
         // reason the daemon's walk was: a `read_dir` of /proc plus one open per descriptor
