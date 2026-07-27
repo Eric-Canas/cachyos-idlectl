@@ -93,22 +93,44 @@ Environment=IDLECTL_LOG=info
 #     systemctl --user show idlectl-agent.service -p Result -p StatusErrno
 #     sysctl kernel.unprivileged_userns_clone
 # ---------------------------------------------------------------------------------
+# EVERY DIRECTIVE HERE IS ONE THAT DOES NOT NEED A NAMESPACE, AND THAT IS NOT A
+# PREFERENCE. It is the difference between this agent seeing GPU memory and seeing none.
+#
+# A *user* unit cannot be given a mount namespace by an unprivileged user manager without
+# an unprivileged USER namespace as well, and `CapabilityBoundingSet=` needs one too --
+# dropping your own bounding set requires CAP_SETPCAP, so without a user namespace the
+# unit dies at startup with status=218/CAPABILITIES. Measured on a live session:
+#
+#     shell, or a user unit with none of these:   user:[4026531837]   (the initial one)
+#     the same unit plus PrivateTmp=yes:          user:[4026532846]   (a child)
+#
+# And from inside that child, opening /proc/<pid>/fdinfo of a process owned by THE SAME
+# USER is "Permission denied". /proc/<pid>/fdinfo is guarded by ptrace_may_access, which
+# requires CAP_SYS_PTRACE **in the target's user namespace**; being the same uid is not
+# enough once there is a namespace boundary in between. So a hardened user unit cannot
+# read its own user's DRM clients, which is the agent's entire GPU source.
+#
+# Bisected one directive at a time. Each of ProtectSystem=, ProtectHome=, PrivateTmp=,
+# ProtectKernelTunables=, ProtectKernelLogs=, ProtectControlGroups=, ProtectHostname= and
+# ProtectClock= took the count from 2 processes publishing DRM memory to 0. So did
+# CapabilityBoundingSet=. IPAddressDeny= fails outright, because filtering addresses needs
+# a BPF program the user manager has not been delegated. With the set below the unit stays
+# in the initial user namespace, fdinfo is readable, and the agent reports what it sees.
+#
+# WHAT IS ACTUALLY GIVEN UP, stated plainly: the agent no longer gets a private /tmp, a
+# read-only /usr or an inaccessible /home. What it keeps is everything that constrains a
+# bug in a parser -- it cannot gain privileges, cannot open a socket that is not AF_UNIX,
+# cannot make memory both writable and executable, cannot create a namespace, and is held
+# to @system-service. And the thing those mount directives were defending against is
+# narrower than it looks: this process already runs as the user, with the user's own
+# credentials, so a compromised agent can do what a compromised anything in that session
+# can do. It holds no capability, and the privileged half of this project is a separate
+# process that takes none of its claims on trust.
+#
+# CapabilityBoundingSet= is gone for the same reason and costs nothing: a process started
+# by a user manager has an empty capability set already. The line asserted what was
+# already true, and asserting it required a namespace that broke the agent's own source.
 NoNewPrivileges=yes
-
-# Belt and braces: a process started by a user manager has no capabilities to begin
-# with. The empty set makes that explicit rather than assumed, and survives somebody
-# later wondering whether the agent could be given one.
-CapabilityBoundingSet=
-AmbientCapabilities=
-
-ProtectSystem=strict
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectHostname=yes
-ProtectClock=yes
-PrivateTmp=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 RestrictNamespaces=yes
@@ -116,38 +138,11 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 UMask=0077
 
-# read-only, NOT yes, and the difference is the whole unit working or not working.
-#
-# `ProtectHome=yes` makes three paths inaccessible and empty: /home, /root and
-# **/run/user**. That third one is XDG_RUNTIME_DIR, which holds the Wayland socket and
-# the session bus socket -- the agent's only two inputs. So `yes` does not harden this
-# service, it makes it impossible: it failed every start with "Could not find wayland
-# compositor" and "Authorization required" for X11, on a machine with a perfectly
-# healthy Plasma session.
-#
-# Measured, by bisecting the sandbox with systemd-run --user: with ProtectHome=yes both
-# $XDG_RUNTIME_DIR/wayland-0 and $XDG_RUNTIME_DIR/bus were denied; with
-# ProtectHome=read-only, alone and combined with ProtectSystem=strict, both were
-# reachable and the agent registered with can_blank=true. Only ever caught by installing
-# the package and enabling the unit -- running the binary by hand exercises none of this.
-#
-# read-only still gives what was wanted: the agent reads no file under any home directory
-# and cannot write to one. A future version that needs to write under /home has to argue
-# past this line.
-ProtectHome=read-only
-
-# NOT relaxed either, for the same reason: the agent inspects no process but its own.
-# Process inspection lives in the daemon, which is privileged and does not have to
-# take an unprivileged process's word for what is running.
-ProtectProc=invisible
-ProcSubset=pid
-
-# The Wayland socket, the session bus and the system bus are all AF_UNIX. The agent
-# opens no network socket. An X11 session reached over TCP rather than over its unix
-# socket is not supported, deliberately: a display exported over the network is not a
-# reliable statement about whether somebody is physically present.
+# The Wayland socket, the session bus and the system bus are all AF_UNIX. The agent opens
+# no network socket. An X11 session reached over TCP rather than over its unix socket is
+# not supported, deliberately: a display exported over the network is not a reliable
+# statement about whether somebody is physically present.
 RestrictAddressFamilies=AF_UNIX
-IPAddressDeny=any
 
 SystemCallArchitectures=native
 SystemCallFilter=@system-service

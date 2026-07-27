@@ -494,7 +494,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "idlectl"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-io",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "idlectl-agent"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "idlectl-config"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "idlectl-policy",
  "serde",
@@ -536,14 +536,14 @@ dependencies = [
 
 [[package]]
 name = "idlectl-policy"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "idlepolicyd"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-channel",

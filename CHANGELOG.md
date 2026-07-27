@@ -15,6 +15,41 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.2.1] - 2026-07-27
+
+### Fixed
+
+- **The agent's own sandbox made the GPU source it had just been given blind.** `0.2.0` moved the
+  DRM `fdinfo` walk into the session agent to avoid granting the daemon `CAP_SYS_PTRACE`, and then
+  the agent reported zero holders on a machine with two processes publishing DRM memory. The cause
+  is one layer deeper than a wrong directive.
+
+  An unprivileged user manager cannot give a unit a mount namespace without an unprivileged **user**
+  namespace as well, and `CapabilityBoundingSet=` needs one too, since dropping your own bounding
+  set requires `CAP_SETPCAP` — without it the unit dies at `status=218/CAPABILITIES`. Measured on a
+  live session: a plain user unit runs in `user:[4026531837]`, the initial namespace; add
+  `PrivateTmp=yes` and it becomes `user:[4026532846]`, a child. From inside that child, opening
+  `/proc/<pid>/fdinfo` of a process **owned by the same user** is *"Permission denied"* —
+  `ptrace_may_access` wants `CAP_SYS_PTRACE` in the *target's* user namespace, and same-uid does not
+  survive a namespace boundary.
+
+  Bisected one directive at a time: `ProtectSystem=`, `ProtectHome=`, `PrivateTmp=`,
+  `ProtectKernelTunables=`, `ProtectKernelLogs=`, `ProtectControlGroups=`, `ProtectHostname=`,
+  `ProtectClock=` and `CapabilityBoundingSet=` each took the count from 2 to 0. `IPAddressDeny=`
+  fails outright, needing a BPF program the user manager has not been delegated.
+
+  So the agent unit now carries only directives that need no namespace: `NoNewPrivileges`,
+  `RestrictSUIDSGID`, `RestrictRealtime`, `RestrictNamespaces`, `LockPersonality`,
+  `MemoryDenyWriteExecute`, `UMask`, `RestrictAddressFamilies=AF_UNIX`, `SystemCallArchitectures`
+  and the two `SystemCallFilter` lines. Given up: a private `/tmp`, a read-only `/usr`, an
+  inaccessible `/home`. Kept: everything that constrains a bug in a parser. The process already runs
+  with the user's own credentials, holds no capability either way, and the privileged half takes
+  none of its claims on trust.
+
+  `CapabilityBoundingSet=` was asserting something already true — a process started by a user
+  manager has an empty capability set — at the price of a namespace that broke the agent's only GPU
+  source.
+
 ## [0.2.0] - 2026-07-27
 
 ### Changed
@@ -242,7 +277,8 @@ reasoned about — the notes below record what that verification changed.
 - `TESTING.md` with the manual suspend/resume protocol, including the normative resume case, and an
   explicit account of what CI cannot cover.
 
-[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.2...v0.1.3
