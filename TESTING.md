@@ -199,6 +199,13 @@ systemd-run --user --wait --pipe -p ProtectHome=yes \
 both of the agent's sockets live. This shipped broken in 0.1.1 and was invisible to every test that
 started the binary directly.
 
+Then run `idlectl doctor` and read the *reason* beside every fact, not just its state. A detector
+that works from a shell and reports `indeterminate` under the unit is a sandbox fault too, and the
+same bisection finds it. Two that shipped this way: `DeviceAllow=… r` on the NVIDIA nodes, which
+makes NVML fail with *"couldn't communicate with the NVIDIA driver"* because it needs `rw` (fixed in
+0.1.3); and an empty `CapabilityBoundingSet=`, which stops root traversing a `0700` home and so
+hides a Steam install that is plainly there.
+
 ### 0. Baseline
 
 ```sh

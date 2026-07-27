@@ -161,16 +161,34 @@ ProcSubset=pid
 # /dev/nvidia* character devices. PrivateDevices=yes replaces /dev with API
 # pseudo-devices only, and no amount of DeviceAllow= can put a node back into a /dev
 # that does not contain it. So the private /dev is given up and a closed device policy
-# with an explicit read-only allowlist is used instead, which is the same protection
-# expressed at the cgroup rather than the mount.
+# with an explicit allowlist is used instead, which is the same protection expressed at
+# the cgroup rather than the mount.
 #
 # On AMD and Intel the equivalent data comes from sysfs and needs none of this; the
 # allowlist simply matches nothing and costs nothing.
+#
+# `rw`, not `r`, and by device CLASS rather than by node. Both of those were wrong here
+# and the combination made the two GPU facts read `indeterminate` forever on the one
+# machine they exist for.
+#
+#   * NVML does not merely read /dev/nvidiactl, it drives the driver through ioctls on an
+#     O_RDWR handle. With `r` the whole thing fails at the first call, and nvidia-smi
+#     reports "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA
+#     driver" -- which reads like a broken driver and is in fact a cgroup denial.
+#   * /dev/nvidia0 was never allowed at all, only nvidiactl and nvidia-uvm.
+#   * `char-nvidia-frontend` is not a device class. systemd resolves `char-NAME` through
+#     /proc/devices, which on a live NVIDIA machine lists `nvidia`, `nvidiactl`,
+#     `nvidia-modeset` (all major 195) and `nvidia-uvm` -- no `nvidia-frontend`. A name
+#     that matches nothing is silently a no-op.
+#
+# Classes rather than nodes so a second card, or any other numbering, keeps working
+# without an edit. Measured under this unit's full sandbox, capability set included:
+# `nvidia-smi --query-compute-apps` returns rows with these two lines and fails without
+# them.
 PrivateDevices=no
 DevicePolicy=closed
-DeviceAllow=/dev/nvidiactl r
-DeviceAllow=/dev/nvidia-uvm r
-DeviceAllow=char-nvidia-frontend r
+DeviceAllow=char-nvidia rw
+DeviceAllow=char-nvidia-uvm rw
 
 # ---------------------------------------------------------------------------------
 # Network

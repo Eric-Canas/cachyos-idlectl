@@ -13,7 +13,36 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 ## [Unreleased]
 
-Nothing yet.
+### Known
+
+- **`steam_game_running` and `steam_downloading` report `unavailable` on a normal install.** The
+  daemon runs as root with `CapabilityBoundingSet=` empty, and Arch creates home directories `0700`,
+  so it cannot traverse `/home/<user>/` to find `.local/share/Steam` — measured: the same `ls` finds
+  it with capabilities and returns *"No such file or directory"* without them. `steam_root` in the
+  configuration does not help, because the obstacle is the home directory rather than the path. The
+  facts degrade correctly (`unavailable`, blocks inert, never a false veto), but the detector cannot
+  work as placed. The fix is a design choice — grant `CAP_DAC_READ_SEARCH`, or move the fact to the
+  session agent the way `media_playing` already is — and is not made here.
+
+## [0.1.3] - 2026-07-27
+
+### Fixed
+
+- **Both GPU facts read `indeterminate` forever on an NVIDIA machine, under the shipped unit.**
+  `idlepolicyd.service` allowed the NVIDIA character devices read-only. NVML does not merely read
+  them: it drives the driver through ioctls on an `O_RDWR` handle, so every call failed and
+  `nvidia-smi` reported *"NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA
+  driver"* — indistinguishable from a broken driver, and in fact a cgroup denial. Two smaller faults
+  in the same allowlist: `/dev/nvidia0` was never listed, and `char-nvidia-frontend` is not a device
+  class at all, so it matched nothing. systemd resolves `char-NAME` through `/proc/devices`, which
+  lists `nvidia`, `nvidiactl`, `nvidia-modeset` and `nvidia-uvm`.
+
+  Now `DeviceAllow=char-nvidia rw` and `DeviceAllow=char-nvidia-uvm rw`: by class, so a second card
+  or different numbering keeps working. Verified under the unit's full sandbox including the empty
+  capability set.
+
+  The consequence was not a missing detector but a machine that never sleeps: `indeterminate` vetoes
+  every sleep action, which is the correct direction to fail in and completely useless.
 
 ## [0.1.2] - 2026-07-27
 
@@ -162,7 +191,8 @@ reasoned about — the notes below record what that verification changed.
 - `TESTING.md` with the manual suspend/resume protocol, including the normative resume case, and an
   explicit account of what CI cannot cover.
 
-[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Eric-Canas/cachyos-idlectl/releases/tag/v0.1.0
