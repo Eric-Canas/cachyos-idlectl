@@ -109,6 +109,35 @@
     -->
     <method name="Doctor">
       <arg name="text" type="s" direction="out"/>
+      <!--
+        Whether everything is in order. The client's exit status is THIS, never a
+        re-reading of the text: [OBS-4] makes doctor non-zero if any configuration
+        fault, any indeterminate fact, or any standing hazard is present — three
+        conditions, not one — and a client that grepped the prose to decide would
+        disagree with the daemon the first time a word changed.
+      -->
+      <arg name="healthy" type="b" direction="out"/>
+    </method>
+
+    <!--
+      The same information Explain() prints, as a JSON document.
+
+      This is what an external caller reads: a relay that woke this machine and needs
+      to know whether it may put it back to sleep, a monitoring check, a desktop
+      applet. It carries every fact with its state and its evidence, every action with
+      its floor, ceiling, resolved deadline and what is holding it, the configuration
+      layers in force, any faults, and the leases held.
+
+      The top-level `schema` integer is the contract. Fields may be ADDED without
+      changing it; a field that changes meaning or disappears bumps it. Read `schema`
+      before anything else and refuse a number you do not know — guessing at a
+      document you cannot parse is how a relay ends up suspending a machine because a
+      field it wanted was missing and defaulted to zero.
+
+      Not polkit-checked, for the same reason as Explain().
+    -->
+    <method name="Report">
+      <arg name="json" type="s" direction="out"/>
     </method>
 
     <!--
@@ -133,6 +162,12 @@
       polkit: io.github.ericcanas.Idlectl1.rest
     -->
     <method name="Rest">
+      <!--
+        "screen_off", "suspend", "hibernate" or "poweroff". An EMPTY string means
+        suspend, always: there is no configurable default rest action, and with
+        poweroff requiring the word to be typed, no request can close somebody's
+        session unless its sender said so.
+      -->
       <arg name="action" type="s" direction="in"/>
       <arg name="accepted" type="b" direction="out"/>
       <annotation name="io.github.ericcanas.Idlectl1.PolkitAction"
@@ -190,6 +225,22 @@
     </method>
 
     <!--
+      Release a lease by name, before its handle is closed and before its TTL expires.
+
+      Returns whether one was held. Releasing only ever permits the machine to sleep,
+      which its schedule was going to do anyway, so this is authorised by the same
+      lease action rather than by one of its own.
+
+      polkit: io.github.ericcanas.Idlectl1.lease
+    -->
+    <method name="ReleaseLease">
+      <arg name="who" type="s" direction="in"/>
+      <arg name="released" type="b" direction="out"/>
+      <annotation name="io.github.ericcanas.Idlectl1.PolkitAction"
+                  value="io.github.ericcanas.Idlectl1.lease"/>
+    </method>
+
+    <!--
       Leases currently held, as (who, why, acquired_usec, expires_usec, uid).
       Not polkit-checked: seeing what is holding a machine awake is diagnosis.
     -->
@@ -219,6 +270,77 @@
       <annotation name="io.github.ericcanas.Idlectl1.PolkitAction"
                   value="io.github.ericcanas.Idlectl1.reload"/>
     </method>
+
+    <!-- ==================== the session agent's side ====================== -->
+
+    <!--
+      Register the calling connection as the agent for one session.
+
+      Returns the interval, in MICROSECONDS, at which the agent must call ReportSession.
+      Returned rather than agreed in advance so the two cannot be configured separately
+      and drift: a daemon expecting a report every 30 s and an agent sending one every
+      120 s produces a permanently indeterminate human_active and a machine that never
+      sleeps, with nothing obviously wrong on either side.
+
+      NOT polkit-checked, deliberately. Registering only ever ADDS a reason the machine
+      might stay awake, so refusing to register is what a hostile caller would want.
+      What an agent can claim is bounded instead: it reports idleness for its own
+      session and can be told to blank its own screen, and nothing else. The uid is
+      taken from the bus, never from an argument.
+
+      The daemon remembers the caller's UNIQUE connection name and calls Blank/Unblank
+      back on it. That is why the agent owns no well-known name and why an ordinary
+      user cannot squat the agent interface by claiming one.
+    -->
+    <method name="RegisterAgent">
+      <arg name="session_id" type="s" direction="in"/>
+      <arg name="can_blank" type="b" direction="in"/>
+      <arg name="interval_usec" type="t" direction="out"/>
+    </method>
+
+    <!--
+      Report what the calling agent can see inside its own session.
+
+      `idle_usec` is how long since the last REAL input, from ext-idle-notify-v1 on
+      Wayland or the MIT-SCREEN-SAVER counter on X11. UINT64_MAX means "I am alive and
+      my idle protocol is not answering". That is deliberately distinct from a very
+      large idle time, and the distinction is the whole point: a large idle time PERMITS
+      a sleep, and an agent whose protocol broke has observed nothing at all. The daemon
+      turns UINT64_MAX into human_active = indeterminate, which vetoes every sleep
+      action.
+
+      `media_playing` is one of "true", "false", "indeterminate" or "unavailable" — the
+      same four-name vocabulary the Facts property publishes, for the same reason: a
+      session with no player and a player that refused to answer are not the same thing,
+      and collapsing them into "false" is how a veto stops existing without anybody
+      noticing.
+
+      MPRIS is reported from here rather than read by the daemon because A ROOT DAEMON
+      CANNOT CONNECT TO A USER SESSION BUS AT ALL. Measured: the connection is accepted
+      at the socket and then closed during authentication, because a session bus serves
+      exactly one uid and root is not special to D-Bus. No file permission changes that.
+      The privileged half of this project therefore touches no session bus anywhere,
+      which is a smaller attack surface as well as the only thing that works.
+
+      This doubles as the liveness heartbeat. It must be called at the interval
+      RegisterAgent returned even when nothing has changed, because the human-presence
+      signal has to DISAPPEAR on failure: while somebody is holding a controller an
+      idle notifier emits nothing at all, so a crashed agent and a person playing a
+      game are indistinguishable except by the missing heartbeat.
+
+      An unregistered connection is refused rather than silently ignored, so that an
+      agent whose daemon restarted learns to register again.
+    -->
+    <method name="ReportSession">
+      <arg name="idle_usec" type="t" direction="in"/>
+      <arg name="media_playing" type="s" direction="in"/>
+    </method>
+
+    <!--
+      Unregister the calling agent. Called on clean shutdown, so the daemon does not
+      have to wait out a heartbeat timeout to notice.
+    -->
+    <method name="UnregisterAgent"/>
 
     <!-- ============================= signals ============================== -->
 

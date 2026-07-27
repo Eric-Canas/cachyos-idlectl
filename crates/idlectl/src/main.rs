@@ -1,12 +1,13 @@
-//! `idlectl` -- the command-line client.
+//! `idlectl` — the command-line client.
 //!
-//! # Status
+//! Everything here goes over D-Bus to `idlepolicyd`. The tool holds no privilege of its
+//! own and knows no policy: it cannot suspend a machine, it can only ask, and it is
+//! authorized by the same polkit actions any other caller would be. That is deliberate —
+//! a command-line tool with a private back door is a second interface to audit.
 //!
-//! Pre-release skeleton. `check-config` works and is genuinely useful; every command that
-//! needs a running `idlepolicyd` reports that it is not implemented yet.
-//!
-//! The command surface below is the design, not a placeholder. It is written out in full
-//! so that `--help` documents the intended contract while the daemon is being built.
+//! The one exception is `check-config`, which parses files and contacts nothing. It has to
+//! work when the daemon will not start, because "the daemon will not start" is usually a
+//! configuration file.
 
 #![forbid(unsafe_code)]
 
@@ -16,9 +17,50 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use idlectl_config::{ADMIN_CONFIG, DROPIN_DIR, Source, VENDOR_CONFIG};
 
-/// The well-known bus name of the daemon. See the note in `idlepolicyd` on why it is
-/// spelled this way.
+/// The well-known bus name of the daemon.
+///
+/// Lower-case and without a hyphen on purpose. The D-Bus specification restricts the
+/// elements of an interface name to `[A-Za-z0-9_]`, so a forge handle containing a hyphen
+/// cannot appear literally. This spelling is permanent: it is baked into the bus policy
+/// filename, the polkit action ids, the introspection XML and every client.
 const BUS_NAME: &str = "io.github.ericcanas.Idlectl1";
+const OBJECT_PATH: &str = "/io/github/ericcanas/Idlectl1";
+
+#[zbus::proxy(
+    interface = "io.github.ericcanas.Idlectl1.Manager",
+    default_service = "io.github.ericcanas.Idlectl1",
+    default_path = "/io/github/ericcanas/Idlectl1",
+    gen_blocking = false
+)]
+trait Manager {
+    fn explain(&self, action: &str) -> zbus::Result<String>;
+    fn doctor(&self) -> zbus::Result<(String, bool)>;
+    fn report(&self) -> zbus::Result<String>;
+    fn rest(&self, action: &str) -> zbus::Result<bool>;
+    fn rest_forced(&self, action: &str, why: &str) -> zbus::Result<()>;
+    fn acquire_lease(
+        &self,
+        who: &str,
+        why: &str,
+        ttl_usec: u64,
+    ) -> zbus::Result<zbus::zvariant::OwnedFd>;
+    fn release_lease(&self, who: &str) -> zbus::Result<bool>;
+    fn list_leases(&self) -> zbus::Result<Vec<(String, String, u64, u64, u32)>>;
+    fn reload(&self) -> zbus::Result<Vec<String>>;
+
+    #[zbus(property)]
+    fn version(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn config_layers(&self) -> zbus::Result<Vec<String>>;
+    #[zbus(property)]
+    fn facts(&self) -> zbus::Result<Vec<(String, String)>>;
+    #[zbus(property)]
+    fn deadlines(&self) -> zbus::Result<Vec<(String, u64, bool)>>;
+    #[zbus(property)]
+    fn next_deadline_usec(&self) -> zbus::Result<u64>;
+    #[zbus(property)]
+    fn dry_run(&self) -> zbus::Result<bool>;
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -35,11 +77,6 @@ struct Cli {
     command: Command,
 }
 
-// The arguments of every daemon-backed command are parsed but not yet read, because the
-// daemon side does not exist. They are written out in full anyway: `--help` is the design
-// document a user actually reads, and shipping a CLI whose help text grows later means
-// shipping one whose contract was never pinned down.
-#[allow(dead_code)]
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Show what the daemon currently believes and what it will do next.
@@ -63,6 +100,9 @@ enum Command {
     /// Facts whose capability is absent read as `unavailable` and behave as false. Facts
     /// whose detector is broken read as `indeterminate` and veto. doctor is how the
     /// difference is confirmed rather than assumed.
+    ///
+    /// Exits non-zero if any configuration fault, any indeterminate fact, or any standing
+    /// hazard is present.
     Doctor(OutputArgs),
 
     /// Ask the machine to rest now.
@@ -96,28 +136,35 @@ struct OutputArgs {
     json: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Args)]
 struct RestArgs {
-    /// Which action to request. Defaults to suspend.
-    #[arg(default_value = "suspend")]
+    /// Which action to request: suspend, hibernate or poweroff.
+    ///
+    /// Defaults to suspend, always. There is no configurable default rest action: with
+    /// poweroff requiring this word to be typed, no request can close somebody's session
+    /// unless its sender said so.
+    #[arg(long, value_name = "ACTION", default_value = "suspend")]
     action: String,
 
-    /// Satisfy the base schedule and the post-resume settle window immediately, instead
-    /// of waiting for them to elapse.
+    /// Accepted and does nothing: this is what `rest` already does.
     ///
-    /// This does NOT collapse condition blocks. A running game, an active download, a
-    /// held lease or an open remote session are all still evaluated normally, each on its
-    /// own clock. `--now` is what a remote relay sends when it is finished with a
-    /// machine; it must never be able to suspend one that is in the middle of something.
-    #[arg(long)]
+    /// Every rest request satisfies the base schedule and the post-resume settle window,
+    /// and only those two. It does NOT collapse condition blocks: a running game, an
+    /// active download, a held lease and an open remote session are all still evaluated
+    /// normally, and any of them can still refuse. The flag is accepted because the
+    /// specification names the command `rest --now`.
+    #[arg(long, hide = true)]
     now: bool,
 
-    /// Override every block, including the human_active floor.
+    /// Override every block, including the human-presence floor.
     ///
-    /// Deliberately separate from `--now`, deliberately named differently, gated by its
-    /// own polkit action, and always logged with the reason. This is the only way to
-    /// suspend a machine somebody is actively using, and it should feel like it.
+    /// Deliberately separate from the ordinary request, deliberately named differently,
+    /// gated by its own polkit action, and always logged with the reason. This is the only
+    /// way to suspend a machine somebody is actively using, and it should feel like it.
+    ///
+    /// What it is actually for: a machine wedged awake by something broken rather than by
+    /// something happening — a dead detector, or a configuration file that had to be
+    /// rejected. Neither of those is a block, so an ordinary request cannot help.
     #[arg(long, requires = "why")]
     force: bool,
 
@@ -126,13 +173,17 @@ struct RestArgs {
     why: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Subcommand)]
 enum LeaseCommand {
     /// Take a lease. The machine will not sleep while it is held.
     ///
     /// The lease is released when the returned handle is closed, so a job that crashes
     /// cannot pin a machine awake forever, and it also expires after its TTL.
+    ///
+    /// Because the handle is a file descriptor, `idlectl lease acquire` **stays in the
+    /// foreground** holding it: run the work as a child of it, or background it and stop
+    /// it when the work is done. A command that exited immediately would release the
+    /// lease it had just taken.
     Acquire {
         /// Identifier for the holder, shown by `idlectl lease list`.
         #[arg(value_name = "ID")]
@@ -145,6 +196,11 @@ enum LeaseCommand {
         /// Reason, shown by `idlectl lease list` and recorded in the journal.
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
+
+        /// Run this command, hold the lease for exactly as long as it runs, and exit with
+        /// its status.
+        #[arg(last = true, value_name = "COMMAND")]
+        command: Vec<String>,
     },
 
     /// Release a lease early.
@@ -160,7 +216,7 @@ enum LeaseCommand {
 
 fn main() -> std::process::ExitCode {
     match run(Cli::parse()) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             eprintln!("idlectl: {err:#}");
             std::process::ExitCode::FAILURE
@@ -168,45 +224,232 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
-    match cli.command {
-        Command::CheckConfig { files, output } => check_config(files, output.json),
-
-        Command::Status(_)
-        | Command::Explain { .. }
-        | Command::Doctor(_)
-        | Command::Rest(_)
-        | Command::Lease(_)
-        | Command::Reload => not_implemented(),
+fn run(cli: Cli) -> Result<std::process::ExitCode> {
+    // check-config contacts nothing, on purpose: it has to work when the daemon will not
+    // start, and the usual reason the daemon will not start is a configuration file.
+    if let Command::CheckConfig { files, output } = cli.command {
+        return check_config(files, output.json);
     }
+
+    async_io::block_on(async {
+        let bus = zbus::Connection::system()
+            .await
+            .context("cannot reach the D-Bus system bus")?;
+        let manager = ManagerProxy::new(&bus).await.map_err(not_running)?;
+
+        match cli.command {
+            Command::Status(output) => status(&manager, output.json).await,
+            Command::Explain { action, output } => explain(&manager, action, output.json).await,
+            Command::Doctor(output) => doctor(&manager, output.json).await,
+            Command::Rest(args) => rest(&manager, args).await,
+            Command::Lease(command) => lease(&manager, command).await,
+            Command::Reload => {
+                let layers = manager.reload().await?;
+                for layer in layers {
+                    println!("{layer}");
+                }
+                Ok(std::process::ExitCode::SUCCESS)
+            }
+            Command::CheckConfig { .. } => unreachable!("handled above"),
+        }
+    })
 }
 
-/// Confirms the bus is reachable, then reports honestly that the daemon side does not
-/// exist yet.
+/// Turns "nothing owns that bus name" into the sentence that actually helps.
 ///
-/// Checking the bus first is not ceremony: the most likely reason a command fails on a
-/// fresh install is that nothing enabled the service, and that deserves a different
+/// The most likely reason a command fails on a fresh install is that nothing enabled the
+/// service — the package deliberately does not, because installing a program that can
+/// suspend a machine is not the same act as permitting it to. That deserves a different
 /// message from a genuine bug.
-fn not_implemented() -> Result<()> {
-    // The connection is dropped immediately and on purpose: we only want to know whether
-    // the bus answers. `let _ =` is explicit about that, because dropping a Connection
-    // closes its socket and a silent discard would read like an oversight.
-    let _ = async_io::block_on(async {
-        zbus::Connection::system()
-            .await
-            .context("cannot reach the D-Bus system bus")
-    })?;
-
-    bail!(
-        "this command needs idlepolicyd, which is not implemented in this pre-release.\n\
-         Note that the package does not enable the service; enabling it is a deliberate \
-         act:\n    systemctl enable --now idlepolicyd.service\n\
+fn not_running(err: zbus::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "cannot reach idlepolicyd ({err}).\n\
+         The package does not enable the service; enabling it is a deliberate act:\n\
+         \x20   sudo systemctl enable --now idlepolicyd.service\n\
          `idlectl check-config` works today and needs no daemon.\n\
-         (bus name: {BUS_NAME})"
+         (bus name: {BUS_NAME}, object: {OBJECT_PATH})"
     )
 }
 
-fn check_config(files: Vec<PathBuf>, json: bool) -> Result<()> {
+async fn status(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::ExitCode> {
+    if json {
+        println!("{}", manager.report().await?);
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
+
+    println!("idlepolicyd {}", manager.version().await?);
+    if manager.dry_run().await.unwrap_or(false) {
+        println!("MODE       dry run: decisions are logged and never applied");
+    }
+    for layer in manager.config_layers().await? {
+        println!("layer      {layer}");
+    }
+
+    println!();
+    println!("facts");
+    for (name, state) in manager.facts().await? {
+        println!("  {name:<20} {state}");
+    }
+
+    println!();
+    println!("actions");
+    for (name, deadline, due) in manager.deadlines().await? {
+        let when = if due {
+            "DUE".to_owned()
+        } else if deadline == u64::MAX {
+            "never".to_owned()
+        } else {
+            format!("at +{}s since boot", deadline / 1_000_000)
+        };
+        println!("  {name:<20} {when}");
+    }
+    println!();
+    println!(
+        "Run `idlectl explain` for the whole computation, or `idlectl doctor` for what is broken."
+    );
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+async fn explain(
+    manager: &ManagerProxy<'_>,
+    action: Option<String>,
+    json: bool,
+) -> Result<std::process::ExitCode> {
+    if json {
+        println!("{}", manager.report().await?);
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
+    print!(
+        "{}",
+        manager.explain(action.as_deref().unwrap_or("")).await?
+    );
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+async fn doctor(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::ExitCode> {
+    let (text, healthy) = manager.doctor().await?;
+    if json {
+        println!("{}", manager.report().await?);
+    } else {
+        print!("{text}");
+    }
+    // The exit status is the daemon's verdict, not a re-derivation from the text. A client
+    // that parsed prose to decide would disagree with the daemon the first time a word
+    // changed.
+    Ok(if healthy {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    })
+}
+
+async fn rest(manager: &ManagerProxy<'_>, args: RestArgs) -> Result<std::process::ExitCode> {
+    if args.force {
+        let why = args.why.unwrap_or_default();
+        manager.rest_forced(&args.action, &why).await?;
+        println!("forced {}: {why}", args.action);
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
+
+    if manager.rest(&args.action).await? {
+        println!("{}: accepted", args.action);
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
+
+    // Not an error. Something is still holding the machine awake, and the next line says
+    // what -- which is the whole reason a refusal is worth more than a silent no-op.
+    println!("{}: refused, the machine is not free to rest", args.action);
+    println!();
+    print!(
+        "{}",
+        manager.explain(&args.action).await.unwrap_or_default()
+    );
+    Ok(std::process::ExitCode::FAILURE)
+}
+
+async fn lease(
+    manager: &ManagerProxy<'_>,
+    command: LeaseCommand,
+) -> Result<std::process::ExitCode> {
+    match command {
+        LeaseCommand::Acquire {
+            id,
+            ttl,
+            why,
+            command,
+        } => {
+            let ttl = idlectl_config::parse_duration(&ttl)
+                .map_err(|err| anyhow::anyhow!("--ttl: {err}"))?;
+            let handle = manager
+                .acquire_lease(
+                    &id,
+                    why.as_deref().unwrap_or(""),
+                    u64::try_from(ttl.as_micros()).unwrap_or(u64::MAX),
+                )
+                .await?;
+
+            if command.is_empty() {
+                eprintln!(
+                    "lease {id} held for up to {}s. Close this process to release it.",
+                    ttl.as_secs()
+                );
+                // Holding the descriptor IS the lease. Returning here would release it,
+                // which is why this blocks rather than printing a handle and exiting.
+                futures_lite::future::pending::<()>().await;
+                unreachable!()
+            }
+
+            let status = std::process::Command::new(&command[0])
+                .args(&command[1..])
+                .status()
+                .with_context(|| format!("cannot run {}", command[0]))?;
+            // Explicit, so the lease's lifetime is visibly tied to the child's and not to
+            // whatever the optimiser decides about an unused binding.
+            drop(handle);
+            Ok(std::process::ExitCode::from(
+                u8::try_from(status.code().unwrap_or(1)).unwrap_or(1),
+            ))
+        }
+        LeaseCommand::Release { id } => {
+            if manager.release_lease(&id).await? {
+                println!("released {id}");
+                Ok(std::process::ExitCode::SUCCESS)
+            } else {
+                bail!("no lease named {id} is held")
+            }
+        }
+        LeaseCommand::List(output) => {
+            let leases = manager.list_leases().await?;
+            if output.json {
+                let rows: Vec<_> = leases
+                    .iter()
+                    .map(|(who, why, acquired, expires, uid)| {
+                        serde_json::json!({
+                            "who": who,
+                            "why": why,
+                            "acquired_usec": acquired,
+                            "expires_usec": expires,
+                            "uid": uid,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if leases.is_empty() {
+                println!("no leases held");
+            } else {
+                for (who, why, _acquired, expires, uid) in leases {
+                    println!(
+                        "{who:<24} uid {uid:<6} expires at +{}s  {why}",
+                        expires / 1_000_000
+                    );
+                }
+            }
+            Ok(std::process::ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn check_config(files: Vec<PathBuf>, json: bool) -> Result<std::process::ExitCode> {
     let paths = if files.is_empty() {
         default_layers()
     } else {
@@ -257,10 +500,11 @@ fn check_config(files: Vec<PathBuf>, json: bool) -> Result<()> {
             "policy": loaded.policy,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
-        if !faults.is_empty() {
-            bail!("{} configuration fault(s)", faults.len());
-        }
-        return Ok(());
+        return Ok(if faults.is_empty() {
+            std::process::ExitCode::SUCCESS
+        } else {
+            std::process::ExitCode::FAILURE
+        });
     }
 
     for layer in &loaded.layers {
@@ -300,7 +544,7 @@ fn check_config(files: Vec<PathBuf>, json: bool) -> Result<()> {
         eprintln!(
             "hold suspend, hibernate and poweroff until this is fixed. screen_off is unaffected."
         );
-        bail!("{} configuration fault(s)", faults.len());
+        return Ok(std::process::ExitCode::FAILURE);
     }
 
     println!();
@@ -308,7 +552,7 @@ fn check_config(files: Vec<PathBuf>, json: bool) -> Result<()> {
         "{} block(s), configuration is valid.",
         loaded.policy.blocks.len()
     );
-    Ok(())
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
 /// The layers the daemon would read, skipping the ones that do not exist.
@@ -331,7 +575,7 @@ fn default_layers() -> Vec<PathBuf> {
 
     if let Ok(entries) = std::fs::read_dir(DROPIN_DIR) {
         let mut dropins: Vec<PathBuf> = entries
-            .filter_map(|entry| entry.ok())
+            .filter_map(Result::ok)
             .map(|entry| entry.path())
             .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
             .collect();

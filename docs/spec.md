@@ -1011,6 +1011,16 @@ authenticated request may ask it to, and the safety floors still hold.
 **[REQ-6]** A request that cannot fire immediately MAY be held pending, with a TTL. While pending,
 it MUST be re-evaluated on the schedule of [COMP-6].
 
+*(Not implemented in v1, and the omission is what settles the spelling of the command. `MAY` is a
+real MAY: a request that cannot fire is refused, the refusal names what is holding the machine, and
+the caller decides whether to ask again. With no pending mode there is exactly **one** kind of
+request, so `rest` and `rest --now` are the same command. Implementations MUST accept `--now` —
+this document names the command that way throughout and so does every deployment written against
+it — and MUST NOT give the bare `rest` some other meaning, because a flag that silently changes
+which floors are satisfied is the one drift this section cannot tolerate. [REQ-7] and [REQ-8] below
+are consequently vacuous in v1; they are retained rather than withdrawn because they constrain any
+implementation that later adds the pending mode.)*
+
 **[REQ-7]** A pending request MUST be discarded if the human-input clock advances after the
 request was made. *(Rationale: somebody walked in while the machine was working; the machine now
 belongs to whoever is in front of it. The discard MUST be logged, so that a cancelled request is
@@ -1941,6 +1951,7 @@ poweroff = "never"
 # download has no opinion about the panel — [COMP-2b].
 [while.steam_downloading]
 suspend = "never"
+hibernate = "never"
 poweroff = "never"
 
 # GPU load NOT attributable to a game: a finite timeout counted from when the
@@ -1949,6 +1960,7 @@ poweroff = "never"
 [while.gpu_busy_other]
 clock = "condition"
 suspend = "20m"
+hibernate = "never"
 poweroff = "never"
 
 # Counters, not "is the unit active" — [FACT-32]. Ships UNAVAILABLE until
@@ -1961,20 +1973,31 @@ poweroff = "never"
 # A signal we choose to honour, never relied on — [FACT-12].
 [while.inhibitor_block]
 suspend = "never"
+hibernate = "never"
 poweroff = "never"
 ```
 
-**On `poweroff = "never"` in every safety block.** The base schedule already says `never`, so the
-restatements look redundant. They are not: the single most likely edit anybody makes to this file —
-and the one its own comments anticipate — is `[while.always] poweroff = "8h"`. Without the
-restatements, that one line gives a machine that can power itself off mid-film, mid-game and
-mid-download. With them, the safe answer survives the edit. `[while.gpu_busy_other]` keeps its
-finite `suspend` and takes `poweroff = "never"` like the rest.
+**On `hibernate` and `poweroff` being `"never"` in every safety block.** The base schedule already
+says `never` for both, so the restatements look redundant. They are not: the single most likely edit
+anybody makes to this file — and the one its own comments anticipate — is `[while.always] poweroff =
+"8h"`, or the same for `hibernate`. Without the restatements, that one line gives a machine that can
+power itself off mid-film, mid-game and mid-download. With them, the safe answer survives the edit.
+`[while.gpu_busy_other]` keeps its finite `suspend` and takes both `never`s like the rest.
+
+The rule is **both keys in every block**, not "poweroff in every block". An earlier revision of this
+appendix stated it as the latter and then omitted `hibernate` from three blocks —
+`steam_downloading`, `gpu_busy_other` and `inhibitor_block` — which left exactly the hole the rule
+exists to close, for the administrator who enables hibernation rather than poweroff. The shipped
+`data/idlectl.toml` had all three; the appendix did not, and a conformance check that diffs the two
+is what found it.
 
 **On `version`.** It is optional and defaults to `1` ([CFG-21]); whether the shipped file carries
 the line changes nothing about the effective policy.
 
-**On `local_service_busy`.** No `[facts.local_service_busy]` table ships, so no `counters_url` is
+**On `local_service_busy`.** The shipped file carries an explicit `[facts.local_service_busy]
+enabled = false` rather than relying on the compiled-in default, so that `idlectl doctor` reports it
+as *switched off in configuration* and points at the block of comments that says how to turn it on.
+Beyond that, no `counters_url` is
 configured, so the fact reads `UNAVAILABLE` and its detector never runs ([FACT-44]). The
 `[while.local_service_busy]` block above is therefore inert on a fresh install and is listed as
 inert by `doctor` ([FACT-3], [OBS-3].2). It becomes live the moment an administrator points it at a

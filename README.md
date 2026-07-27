@@ -38,8 +38,11 @@ proposal wins, `never` beats everything, an action key a block does not set cont
 that action, and the default over zero true blocks is to do nothing. Order never matters, and there
 is no priority list to get wrong.
 
-> **Status: pre-release.** The specification is being written before the implementation. There is no
-> tagged release and no AUR package yet; the install section below documents the intended shape.
+> **Status: pre-release, and working.** The daemon, the CLI and the session agent are implemented,
+> and everything below has been exercised on a real CachyOS machine: the eleven facts, the decision
+> loop, leases, polkit authorization, the KDE and wlroots blanking backends, and resume detection
+> across a genuine `deep` suspend. There is no tagged release and no AUR package yet, so the install
+> section below is `packaging/install.sh` until there is.
 
 ---
 
@@ -337,7 +340,7 @@ on your behalf: `poweroff` has to be asked for by name, `idlectl rest --action p
 To override a floor you must say so:
 
 ```sh
-idlectl rest --now --force
+idlectl rest --force --why "maintenance window"
 ```
 
 `--force` installs an ephemeral ceiling due *now* for the requested action, for the lifetime of that

@@ -19,6 +19,7 @@ idlectl-policy = { workspace = true, features = ["serde"] }
 idlectl-config = { workspace = true }
 zbus = { workspace = true }
 async-io = { workspace = true }
+futures-lite = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

@@ -191,7 +191,7 @@ never powers itself off. To get escalation, either set *suspend = "never"* and l
 the deeper action own the schedule, delegate to logind's own *suspend-then-hibernate*
 (which idlectl does not fight), or ask for the deep action by name:
 
-	idlectl rest poweroff
+	idlectl rest --action poweroff
 
 # FACT STATES
 

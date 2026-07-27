@@ -77,7 +77,7 @@ An _action_ is one of *screen_off*, *suspend*, *hibernate* or *poweroff*.
 	*poweroff* end or risk ending a session, so they are never chosen on somebody's
 	behalf and must be named:
 
-		idlectl rest poweroff
+		idlectl rest --action poweroff
 
 	Without *--now*, this is a request evaluated against the policy exactly as the
 	daemon's own timer would evaluate it.
@@ -229,7 +229,7 @@ Check a configuration change before applying it:
 
 Suspend a machine somebody is using, on purpose and on the record:
 
-	idlectl rest suspend --force --why "maintenance window"
+	idlectl rest --action suspend --force --why "maintenance window"
 
 # NOTES
 

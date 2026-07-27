@@ -471,6 +471,54 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Every XML file this package installs is machine-parsed by something that
+# fails SILENTLY.
+#
+# Measured, and it cost an hour: a `--` typed inside an XML comment is illegal,
+# polkit's parser abandoned the surrounding <action> without a word in any log,
+# and `idlectl lease` then refused every unprivileged caller with "Action ... is
+# not registered".  The file looked perfect in an editor.  D-Bus bus policy is
+# worse: a malformed .conf means the daemon cannot take its bus name at all.
+#
+# So this step parses them rather than reading them.  xmllint where available,
+# Python's expat otherwise; if neither exists the step FAILS rather than passing,
+# because a gate that silently skips is the class of thing this whole script
+# exists to catch.
+step "installed XML parses (polkit actions, bus policy, introspection)"
+xml_files=$(git ls-files 'data/*.xml' 'data/*.conf' 'data/*.policy' 2>/dev/null || true)
+if [ -z "$xml_files" ]; then
+  ok_because "no XML data files are tracked"
+elif command -v xmllint >/dev/null 2>&1; then
+  rc=0
+  # shellcheck disable=SC2086
+  xmllint --noout $xml_files >"$WORK/out" 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then ok; else
+    bad "xmllint rejected an installed file"
+    indent_file "$WORK/out"
+  fi
+elif command -v python3 >/dev/null 2>&1; then
+  rc=0
+  # shellcheck disable=SC2086
+  python3 - $xml_files >"$WORK/out" 2>&1 <<'PYEOF' || rc=$?
+import sys, xml.dom.minidom
+bad = 0
+for path in sys.argv[1:]:
+    try:
+        xml.dom.minidom.parse(path)
+    except Exception as err:
+        print(f"{path}: {err}")
+        bad = 1
+sys.exit(bad)
+PYEOF
+  if [ "$rc" -eq 0 ]; then ok; else
+    bad "an installed XML file does not parse"
+    indent_file "$WORK/out"
+  fi
+else
+  bad "neither xmllint nor python3 is available to parse the installed XML"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n'
 if [ "$FAILED" -gt 0 ]; then
   printf '%s: %s of %s checks FAILED -- do not publish.\n' "$PROG" "$FAILED" "$STEP" >&2

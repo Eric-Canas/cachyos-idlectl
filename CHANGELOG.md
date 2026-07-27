@@ -18,6 +18,36 @@ tag exists yet.
 
 ### Added
 
+The runtime, on top of the M0 specification and pure engine: `idlepolicyd` (the resident decider),
+`idlectl` (the client), `idlectl-agent` (the per-session reporter), the eleven detectors, leases,
+polkit authorization and the full D-Bus surface. Verified on a real CachyOS machine rather than
+reasoned about — the notes below record what that verification changed.
+
+- **Resume is detected from `CLOCK_BOOTTIME - CLOCK_MONOTONIC`, not from a hook or a signal.**
+  That difference is the total time this boot has spent suspended: the kernel maintains it, a cold
+  boot zeroes it, and it survives a daemon restart. It is also the only mechanism that notices a
+  sleep entered by writing `/sys/power/state` directly, which emits no `PrepareForSleep` and runs no
+  sleep hook. Measured with `rtcwake -m mem`: `PM: suspend entry (deep)`, delta 23.5 s, and the
+  daemon logged the resume with no signal involved. `after_resume` therefore needs no state file at
+  all, and neither does anything else — the package creates no runtime directory.
+- **Both GPU sources are read and merged, rather than one falling back to the other.** On a hybrid
+  machine an integrated AMD GPU publishes DRM `fdinfo` for trivia while the discrete NVIDIA card
+  publishes none, so a fallback chain concludes the generic source works and never asks the card the
+  games run on. Measured: with the merge, a model server holding 11 353 MiB appeared immediately;
+  with the fallback chain it would have read `false` with a game running.
+- **`media_playing` is reported by the session agent, not read by the daemon.** A root daemon cannot
+  connect to a user session bus at all — measured, the bus authenticates by uid over `EXTERNAL` and
+  closes the connection. This is a privilege reduction as well as the only thing that works: the
+  privileged half of the project now touches no session bus anywhere.
+- **`org_kde_kwin_dpms` is supported alongside `wlr-output-power-management-v1`.** KWin implements
+  `ext-idle-notify-v1` (version 2, confirmed on a Plasma session) and the wlroots power protocol not
+  at all. Without the KDE backend, `screen_off` would have been permanently unavailable on the
+  desktop this is most likely to be installed on.
+- **A released lease wakes the loop.** A held lease contributes `never` and so arms no timer;
+  without a watcher on the descriptor, a lease released by its holder exiting was never noticed and
+  held the machine awake for the rest of the boot. Measured, then fixed with a watcher thread per
+  lease and a timer armed at the earliest TTL.
+
 - Specification of the policy engine in `docs/spec.md`, normative over the implementation.
 - Composition rule: a config is a set of `[while.<condition>]` blocks, each giving a timeout per
   action; for each action independently the longest deadline among currently-true blocks that set a

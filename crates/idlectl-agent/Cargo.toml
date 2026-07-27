@@ -17,6 +17,12 @@ path = "src/main.rs"
 [dependencies]
 zbus = { workspace = true }
 async-io = { workspace = true }
+async-channel = { workspace = true }
+wayland-client = { workspace = true }
+wayland-protocols = { workspace = true }
+wayland-protocols-wlr = { workspace = true }
+wayland-protocols-plasma = { workspace = true }
+x11rb = { workspace = true }
 futures-lite = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

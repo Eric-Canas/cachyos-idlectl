@@ -6,11 +6,20 @@
 #
 #     systemctl --user enable --now idlectl-agent.service
 #
-# It reports; it never decides. Three facts only exist inside a desktop session --
-# human idle (the compositor owns it), media playback (MPRIS lives on the session bus)
-# and whether GPU load belongs to a game (matching against the user's own Steam
-# library) -- and a root daemon has no business connecting to a user's session bus to
-# get them.
+# It reports two things and it never decides:
+#
+#   * how long this session has been idle, from ext-idle-notify-v1 on Wayland or the
+#     MIT-SCREEN-SAVER counter on X11;
+#   * whether an MPRIS player in this session is playing.
+#
+# Both are session-scoped and neither is reachable from outside the session. The second
+# is not a stylistic choice: A ROOT DAEMON CANNOT CONNECT TO A USER SESSION BUS. The
+# connection is accepted at the socket and then closed during authentication, because a
+# session bus serves exactly one uid, and no file permission changes that.
+#
+# It does NOT attribute GPU load or look for running games. The daemon reads /proc for
+# itself; putting those here would mean trusting an unprivileged process's claims about
+# what is running on the machine, and there is no reason to.
 #
 # IT ACTS IN EXACTLY ONE WAY, AND THAT IS THE SCREEN.
 #
@@ -21,12 +30,21 @@
 # the agent performs, inside its own session. It can suspend, hibernate or power off
 # nothing, and no configuration can give it those.
 #
-# Without this agent the daemon still works. The session-scoped facts read
-# `unavailable`, which behaves as false, so nothing wedges: the machine follows its
-# schedule using the facts it can see for itself. screen_off then reports
+# WITHOUT THIS AGENT, ON A MACHINE THAT HAS A GRAPHICAL SESSION, THE DAEMON WILL NOT
+# LET THE MACHINE SLEEP. That is deliberate and it is not a bug: a compositor is
+# running, so somebody could be sitting in front of it, and nothing is in a position
+# to say otherwise. human_active reads `indeterminate`, which vetoes every sleep
+# action, and `idlectl doctor` says exactly that and exits non-zero.
+#
+# On a machine with NO graphical session -- a server, a headless box woken by a relay
+# to run a job -- the daemon reads that as "nobody is at the keyboard", which is
+# correct, and the machine follows its schedule normally. Do not run this agent there:
+# starting it and letting it fail turns the working case into the wedged one.
+#
+# screen_off is separate. Where no agent offers a blanking mechanism it reports
 # `unavailable` as an ACTION -- the daemon does not propose it, blocks that set a
-# screen_off key are inert, and `idlectl doctor` says so and names them, rather than
-# the panel quietly never being blanked.
+# screen_off key are inert, and `idlectl doctor` names them. An action that is absent
+# raises no veto on anything: that is knowledge, not doubt.
 ####################################################################################
 
 [Unit]
@@ -37,8 +55,9 @@ After=graphical-session.target
 
 # No Condition*= here either, and for the same reason as in idlepolicyd.service: a
 # skipped unit is a silent unit. In particular there is no check for "is this a
-# Wayland session" or "is Steam installed" -- the agent reports what it can read and
-# says so in the journal when it cannot read something.
+# Wayland session" -- the agent detects its own backend, tries Wayland then X11, and
+# exits non-zero with both errors named if neither works. A unit that failed to start
+# with a message beats one that was skipped with none.
 
 StartLimitIntervalSec=60
 StartLimitBurst=5
@@ -49,9 +68,9 @@ ExecStart=/usr/bin/idlectl-agent
 Restart=on-failure
 RestartSec=5s
 
-# A missing system daemon is not a failure for the agent: idlepolicyd is not enabled
-# by the package and may legitimately never have been turned on. The agent logs a
-# warning and keeps running rather than being restarted forever for no reason.
+# A daemon that restarted has forgotten this agent and refuses its reports. The agent
+# re-registers rather than exiting, so an idlepolicyd upgrade does not require every
+# logged-in user to restart their session.
 Environment=IDLECTL_LOG=info
 
 # ---------------------------------------------------------------------------------
@@ -89,20 +108,16 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 UMask=0077
 
-# RELAXED from ProtectHome=yes.
-#
-# Deciding whether a process is a game means matching it against the Steam library
-# metadata in the user's own home directory. This is the agent's whole reason for
-# existing as a separate, unprivileged process: the data belongs to the user, so the
-# thing reading it runs as the user. Read-only, because it has no reason to write.
-ProtectHome=read-only
+# NOT relaxed. The agent reads no file under any home directory: its two inputs are a
+# compositor protocol and an X server extension, both reached over sockets in
+# XDG_RUNTIME_DIR. If a future version needs to read something under /home, this line
+# is the deliberate obstacle it has to argue past.
+ProtectHome=yes
 
-# RELAXED from ProtectProc=invisible.
-#
-# The agent inspects processes to attribute GPU load. Under `invisible` it would see
-# nothing and report false -- silently, and with a plausible-looking answer, which is
-# worse than an error.
-ProtectProc=default
+# NOT relaxed either, for the same reason: the agent inspects no process but its own.
+# Process inspection lives in the daemon, which is privileged and does not have to
+# take an unprivileged process's word for what is running.
+ProtectProc=invisible
 ProcSubset=pid
 
 # The Wayland socket, the session bus and the system bus are all AF_UNIX. The agent

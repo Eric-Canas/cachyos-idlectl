@@ -45,7 +45,11 @@ StartLimitBurst=5
 Type=dbus
 BusName=io.github.ericcanas.Idlectl1
 ExecStart=/usr/bin/idlepolicyd
-ExecReload=/bin/kill -HUP $MAINPID
+# Reload goes through the daemon's own D-Bus method, not a signal. The daemon handles
+# no signals at all -- sending it SIGHUP terminates it -- and routing the reload through
+# the polkit-checked method means `systemctl reload` and `idlectl reload` are the same
+# code path rather than two that can diverge.
+ExecReload=/usr/bin/idlectl reload
 Restart=on-failure
 RestartSec=5s
 
@@ -59,17 +63,27 @@ StandardError=journal
 Environment=IDLECTL_LOG=info
 
 # ---------------------------------------------------------------------------------
-# Runtime state
-# ---------------------------------------------------------------------------------
-RuntimeDirectory=idlectl
-# 0755, not the 0700 that UMask= would otherwise imply: idlectl(1) and the session
-# agent are unprivileged and must be able to read the daemon's published state.
-RuntimeDirectoryMode=0755
-# Preserved across a restart on purpose. Leases live here, and a lease is a promise
-# that a machine will not sleep during a long job. A daemon restart -- a reload gone
-# wrong, an upgrade, a crash -- must not silently drop that promise and let the
-# machine suspend in the middle of the work the lease was protecting.
-RuntimeDirectoryPreserve=yes
+# Runtime state: THERE IS NONE, AND THAT IS THE DESIGN
+#
+# No RuntimeDirectory=. The daemon writes no file anywhere, at any point, and the
+# three pieces of state that a specification of this shape normally puts in /run are
+# each held somewhere better:
+#
+#   after_resume  -- CLOCK_BOOTTIME minus CLOCK_MONOTONIC is the total time this boot
+#                    has spent suspended. It survives suspend, it is zeroed by a cold
+#                    boot, it is maintained by the kernel, it cannot be deleted by a
+#                    stray rm, and it is not lost when this unit restarts. It is also
+#                    the only mechanism that notices a sleep entered by writing
+#                    /sys/power/state directly, which emits no signal and runs no hook.
+#   leases        -- a pipe descriptor held by the requester. The kernel closes it when
+#                    that process dies, whatever the process intended, which is the one
+#                    failure mode every "hold this open" file gets wrong.
+#   counter samples -- in memory. The first sample after a restart is treated as "in
+#                    use", so a restart restarts the idle countdown rather than
+#                    concluding the service has been idle forever.
+#
+# [ACT-11] requires runtime state directories to be created declaratively rather than
+# lazily by whichever process gets there first. Having none satisfies that outright.
 
 # ---------------------------------------------------------------------------------
 # Privileges
@@ -105,13 +119,14 @@ ProtectControlGroups=yes
 ProtectHostname=yes
 PrivateTmp=yes
 
-# RELAXED from ProtectClock=... interaction, stated explicitly because it is easy to
-# miss: ProtectClock=yes ALSO removes CAP_SYS_TIME *and CAP_WAKE_ALARM* from the
-# bounding set. That is fine today because the daemon never needs to be woken from a
-# suspend by its own timer -- escalation from suspend to hibernate is delegated to
-# logind's suspend-then-hibernate rather than reimplemented here. If a future version
-# arms a CLOCK_BOOTTIME_ALARM timerfd, this line must be relaxed to `no` and
-# CAP_WAKE_ALARM added to CapabilityBoundingSet= above, together.
+# Stated explicitly because it is easy to miss: ProtectClock=yes ALSO removes
+# CAP_SYS_TIME *and CAP_WAKE_ALARM* from the bounding set. Both are fine today.
+# READING CLOCK_BOOTTIME needs no capability -- it is a plain clock_gettime -- and the
+# daemon never needs to be woken from a suspend by its own timer, because escalation
+# from suspend to hibernate is delegated to logind's suspend-then-hibernate rather
+# than reimplemented here. If a future version arms a CLOCK_BOOTTIME_ALARM timerfd,
+# this line must be relaxed to `no` and CAP_WAKE_ALARM added to
+# CapabilityBoundingSet= above, together.
 ProtectClock=yes
 
 # RELAXED from ProtectHome=yes.
@@ -160,13 +175,22 @@ DeviceAllow=char-nvidia-frontend r
 # ---------------------------------------------------------------------------------
 # Network
 #
-# The daemon opens no network socket, ever. AF_UNIX is D-Bus; AF_NETLINK is the udev
-# monitor that reports input devices appearing and disappearing. AF_INET and AF_INET6
-# are absent on purpose: a policy daemon that could reach the network would be a
-# policy daemon that could be asked to do things from the network.
+# The daemon opens exactly one kind of network socket, and only when an administrator
+# has asked for it: the loopback HTTP GET that reads a local service's cumulative
+# counters ([facts.local_service_busy] counters_url). Nothing else here speaks IP.
+#
+# So AF_INET is allowed and the ADDRESSES are what is restricted. IPAddressDeny=any
+# with IPAddressAllow=localhost enforces at the kernel what the code already refuses in
+# software -- it accepts http:// only, and rejects https:// with a message saying this
+# endpoint is expected to be on loopback. Two independent statements of the same rule,
+# and the kernel's is the one that holds if the code is ever wrong.
+#
+# AF_NETLINK is not for a udev monitor (there is none): glibc's name resolution uses it
+# to enumerate interfaces, so resolving `localhost` needs it.
 # ---------------------------------------------------------------------------------
-RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 IPAddressDeny=any
+IPAddressAllow=localhost
 PrivateNetwork=no
 
 # ---------------------------------------------------------------------------------
@@ -185,8 +209,12 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources @mount @debug @obsolete @reboot @swap @cpu-emulation
 
-# Rust static binary; nothing here JITs. If NVML ever fails to load with a permission
-# error that makes no sense, this is the first line to test with.
+# Rust binary; nothing here JITs. It applies to children too, which matters: the GPU
+# facts fall back to running `nvidia-smi` where DRM fdinfo is unavailable, and that
+# loads the proprietary NVML. If nvidia-smi ever fails under this unit with an error
+# that makes no sense while working fine by hand, this is the first line to test with,
+# and the symptom to expect is gpu_busy_* reading `indeterminate` -- which vetoes, so
+# the machine stays awake rather than sleeping on a bad reading.
 MemoryDenyWriteExecute=yes
 
 [Install]

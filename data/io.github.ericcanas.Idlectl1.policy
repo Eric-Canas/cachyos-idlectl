@@ -79,19 +79,28 @@
   <action id="io.github.ericcanas.Idlectl1.lease">
     <description>Hold this machine awake while a job runs</description>
     <message>Authentication is required to hold this machine awake.</message>
-    <!--
-      A lease can only prevent sleep, never cause it, and it is bounded twice over: it
-      dies with the file descriptor that holds it, and it expires at its TTL. The
-      worst outcome of granting it too freely is a machine that stayed awake and can
-      be inspected with `idlectl lease list`.
-
-      allow_inactive=yes is the deliberate part. The canonical caller is a remote
-      session starting long work, and logind considers such a session inactive; there
-      is nobody there to answer a prompt. Denying it would push people towards
-      disabling the whole daemon, which is a strictly worse outcome.
-    -->
     <defaults>
-      <allow_any>no</allow_any>
+      <!--
+        allow_any=yes, and it is the most permissive setting in this file. The reasoning
+        is about what the action can DO, not about who is asking.
+
+        A lease can only ever keep a machine AWAKE. There is no argument to it that can
+        suspend, hibernate or power anything off, it expires on its own TTL, it is
+        released when the holder's file descriptor closes — including when the holder is
+        killed — and it is visible in `idlectl lease list` and in `idlectl doctor` for as
+        long as it is held. The worst a hostile caller achieves is a machine that stays
+        awake and says loudly why.
+
+        allow_inactive was tried first and does not work, which is the measurement behind
+        this. polkit's `inactive` tier means a LOCAL session that is not in the
+        foreground; an SSH login is not a local session at all and falls under `any`. So
+        `allow_inactive=yes` with `allow_any=no` refused the canonical caller — a remote
+        relay taking a lease before a long job — while claiming in a comment to be
+        written for exactly that caller. Measured: AccessDenied over SSH.
+
+        Compare the rest actions above, which can END a session and are gated accordingly.
+      -->
+      <allow_any>yes</allow_any>
       <allow_inactive>yes</allow_inactive>
       <allow_active>yes</allow_active>
     </defaults>

@@ -767,6 +767,61 @@ impl fmt::Display for Clock {
     }
 }
 
+/// Where one clock's origin stands.
+///
+/// Three states, and the third is the whole reason this type exists. A bare
+/// [`Option<BootInstant>`] once meant both "this has not happened yet" and "the detector
+/// that would tell me is broken", and [CLK-12] requires those two to be distinguishable:
+/// the first is normal, the second is a fault that `doctor` must report and exit non-zero
+/// for.
+///
+/// They also do not compose alike. A never-touched human-input clock falls back to the
+/// boot instant ([CLK-7]) precisely so that a machine woken by a remote relay -- which by
+/// definition nobody has touched -- can still reach its base deadline and go back to
+/// sleep. An **unreadable** one contributes `+infinity` to the three sleep actions
+/// ([CLK-11]). Collapsing the two would silently hand the remote-relay fast path to every
+/// machine whose input agent had died.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum ClockOrigin {
+    /// The instant the event last happened.
+    At(BootInstant),
+    /// The event has not happened this boot, and the path that would report it is healthy.
+    NotYet,
+    /// The detector feeding this clock is erroring, stale or absent -- [CLK-11].
+    Unreadable,
+}
+
+impl ClockOrigin {
+    /// The instant, if one is recorded. [`ClockOrigin::NotYet`] and
+    /// [`ClockOrigin::Unreadable`] both yield [`None`]; use the variant itself when the
+    /// difference matters, which is everywhere it is reported to a human.
+    #[must_use]
+    pub const fn instant(self) -> Option<BootInstant> {
+        match self {
+            ClockOrigin::At(t) => Some(t),
+            ClockOrigin::NotYet | ClockOrigin::Unreadable => None,
+        }
+    }
+
+    /// Whether this origin is a fault rather than a normal absence ([CLK-12]).
+    #[must_use]
+    pub const fn is_unreadable(self) -> bool {
+        matches!(self, ClockOrigin::Unreadable)
+    }
+}
+
+impl fmt::Display for ClockOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ClockOrigin::At(t) => write!(f, "+{}s since boot", t.as_nanos() / 1_000_000_000),
+            ClockOrigin::NotYet => f.write_str("not yet this boot"),
+            ClockOrigin::Unreadable => f.write_str("unreadable"),
+        }
+    }
+}
+
 /// The origins available at one evaluation, plus the instant the evaluation happens at.
 ///
 /// Read once per evaluation and passed in whole, so the whole decision is computed against
@@ -777,20 +832,35 @@ impl fmt::Display for Clock {
 pub struct ClockSnapshot {
     /// The instant this evaluation is happening at.
     pub now: BootInstant,
-    /// The last human input, or [`None`] if nothing has been touched this boot.
-    pub last_human_input: Option<BootInstant>,
-    /// The last resume, or [`None`] if the machine has not slept this boot.
-    pub last_resume: Option<BootInstant>,
+    /// The last human input.
+    pub human_input: ClockOrigin,
+    /// The last resume from suspend or hibernate.
+    pub resume: ClockOrigin,
 }
 
 impl ClockSnapshot {
-    /// A snapshot at `now` with no human input and no resume recorded.
+    /// A snapshot at `now` with no human input and no resume recorded, both healthy.
     #[must_use]
     pub fn at(now: BootInstant) -> Self {
         ClockSnapshot {
             now,
-            last_human_input: None,
-            last_resume: None,
+            human_input: ClockOrigin::NotYet,
+            resume: ClockOrigin::NotYet,
+        }
+    }
+
+    /// The raw state of one clock's origin, for [CLK-12] reporting.
+    ///
+    /// [`Clock::Boot`] is always known; [`Clock::ConditionEdge`] is known whenever an edge
+    /// was recorded and otherwise reads as "now", which [`ClockSnapshot::origin`]
+    /// documents.
+    #[must_use]
+    pub fn origin_kind(&self, clock: Clock, condition_since: Option<BootInstant>) -> ClockOrigin {
+        match clock {
+            Clock::HumanInput => self.human_input,
+            Clock::Resume => self.resume,
+            Clock::ConditionEdge => ClockOrigin::At(condition_since.unwrap_or(self.now)),
+            Clock::Boot => ClockOrigin::At(BootInstant::BOOT),
         }
     }
 
@@ -801,7 +871,10 @@ impl ClockSnapshot {
     ///
     /// * [`Clock::HumanInput`] with nothing recorded falls back to [`BootInstant::BOOT`].
     ///   A machine that has never been touched has been idle since boot, and pretending
-    ///   otherwise would keep every headless machine awake forever.
+    ///   otherwise would keep every headless machine awake forever. This is [CLK-7] and it
+    ///   applies **only** to [`ClockOrigin::NotYet`]. [`ClockOrigin::Unreadable`] is
+    ///   [`None`]: an agent that has died must not be able to hand the machine the
+    ///   remote-relay fast path.
     /// * [`Clock::Resume`] with nothing recorded is **unknown**: [`None`]. There is no
     ///   safe numeric fallback. Falling back to [`BootInstant::BOOT`] would make
     ///   `[while.always] clock = "resume"` -- which the parser accepts -- fire
@@ -821,8 +894,12 @@ impl ClockSnapshot {
         condition_since: Option<BootInstant>,
     ) -> Option<BootInstant> {
         match clock {
-            Clock::HumanInput => Some(self.last_human_input.unwrap_or(BootInstant::BOOT)),
-            Clock::Resume => self.last_resume,
+            Clock::HumanInput => match self.human_input {
+                ClockOrigin::At(t) => Some(t),
+                ClockOrigin::NotYet => Some(BootInstant::BOOT),
+                ClockOrigin::Unreadable => None,
+            },
+            Clock::Resume => self.resume.instant(),
             Clock::ConditionEdge => Some(condition_since.unwrap_or(self.now)),
             Clock::Boot => Some(BootInstant::BOOT),
         }
@@ -1815,8 +1892,8 @@ mod tests {
         let now = BootInstant::from_secs(10 * HOUR);
         ClockSnapshot {
             now,
-            last_human_input: Some(now.saturating_sub(secs(2 * HOUR))),
-            last_resume: None,
+            human_input: ClockOrigin::At(now.saturating_sub(secs(2 * HOUR))),
+            resume: ClockOrigin::NotYet,
         }
     }
 
@@ -1836,9 +1913,9 @@ mod tests {
         let clocks = ClockSnapshot {
             now,
             // Idle counters do not reset across a suspend. Nine hours of them survived.
-            last_human_input: Some(now.saturating_sub(secs(9 * HOUR))),
+            human_input: ClockOrigin::At(now.saturating_sub(secs(9 * HOUR))),
             // The machine came back one instant ago.
-            last_resume: Some(now),
+            resume: ClockOrigin::At(now),
         };
         let policy = Policy {
             blocks: vec![base_schedule(), resume_window()],
@@ -1902,8 +1979,8 @@ mod tests {
         let clocks = ClockSnapshot {
             now,
             // Long past the base schedule's thirty minutes.
-            last_human_input: Some(now.saturating_sub(secs(2 * HOUR))),
-            last_resume: None,
+            human_input: ClockOrigin::At(now.saturating_sub(secs(2 * HOUR))),
+            resume: ClockOrigin::NotYet,
         };
         let policy = Policy {
             blocks: vec![
@@ -1934,8 +2011,8 @@ mod tests {
         let now = BootInstant::from_secs(10 * HOUR);
         let clocks = ClockSnapshot {
             now,
-            last_human_input: Some(now.saturating_sub(secs(2 * HOUR))),
-            last_resume: None,
+            human_input: ClockOrigin::At(now.saturating_sub(secs(2 * HOUR))),
+            resume: ClockOrigin::NotYet,
         };
         let policy = Policy {
             blocks: vec![
@@ -1982,8 +2059,8 @@ mod tests {
         let now = BootInstant::from_secs(10 * HOUR);
         let clocks = ClockSnapshot {
             now,
-            last_human_input: Some(now.saturating_sub(secs(2 * HOUR))),
-            last_resume: None,
+            human_input: ClockOrigin::At(now.saturating_sub(secs(2 * HOUR))),
+            resume: ClockOrigin::NotYet,
         };
         let policy = Policy {
             blocks: vec![
@@ -2011,8 +2088,8 @@ mod tests {
         let now = BootInstant::from_secs(20 * HOUR);
         let clocks = ClockSnapshot {
             now,
-            last_human_input: Some(now.saturating_sub(secs(9 * HOUR))),
-            last_resume: Some(now),
+            human_input: ClockOrigin::At(now.saturating_sub(secs(9 * HOUR))),
+            resume: ClockOrigin::At(now),
         };
         let facts = FactSet::new().with(FactId::AfterResume, FactState::True);
 
@@ -2036,8 +2113,8 @@ mod tests {
         let now = BootInstant::from_secs(10 * HOUR);
         let clocks = ClockSnapshot {
             now,
-            last_human_input: Some(now),
-            last_resume: None,
+            human_input: ClockOrigin::At(now),
+            resume: ClockOrigin::NotYet,
         };
         let hard_floor = block(
             BlockKind::While,
@@ -2128,7 +2205,8 @@ mod tests {
             decision.screen_off.deadline,
             Deadline::At(
                 clocks
-                    .last_human_input
+                    .human_input
+                    .instant()
                     .unwrap()
                     .checked_add(secs(10 * MINUTE))
                     .unwrap()
@@ -2301,8 +2379,8 @@ mod tests {
         let clocks = ClockSnapshot {
             now,
             // Somebody typed one second ago, so the base schedule is nowhere near due.
-            last_human_input: Some(now.saturating_sub(secs(1))),
-            last_resume: Some(now.saturating_sub(secs(1))),
+            human_input: ClockOrigin::At(now.saturating_sub(secs(1))),
+            resume: ClockOrigin::At(now.saturating_sub(secs(1))),
         };
         let policy = Policy {
             blocks: vec![
@@ -2435,8 +2513,8 @@ mod tests {
         let now = BootInstant::from_secs(10 * HOUR);
         let clocks = ClockSnapshot {
             now,
-            last_human_input: Some(BootInstant::BOOT),
-            last_resume: None,
+            human_input: ClockOrigin::At(BootInstant::BOOT),
+            resume: ClockOrigin::NotYet,
         };
         let policy = Policy {
             blocks: vec![block(
@@ -2463,6 +2541,95 @@ mod tests {
         assert!(decision.screen_off.due);
     }
 
+    /// [CLK-11] on the human-input clock, which is the case [CLK-7] must not swallow.
+    ///
+    /// Never-touched and unreadable are one bit apart and pull in opposite directions.
+    /// Never-touched is the remote-relay fast path: origin is boot, the base schedule
+    /// expires, the machine goes back to sleep as soon as the job is done. Unreadable is a
+    /// dead agent, and if it took the same fallback then killing the agent would be an
+    /// undocumented way to make any machine sleep on schedule with nothing watching for a
+    /// human. So: same `[while.always]` block, same instant, opposite answers.
+    #[test]
+    fn an_unreadable_human_clock_is_not_the_never_touched_fast_path() {
+        let now = BootInstant::from_secs(10 * HOUR);
+        let policy = Policy {
+            blocks: vec![block(
+                BlockKind::While,
+                Condition::Always,
+                Clock::HumanInput,
+                Timeouts {
+                    screen_off: Some(Timeout::After(secs(10 * MINUTE))),
+                    suspend: Some(Timeout::After(secs(30 * MINUTE))),
+                    ..Timeouts::default()
+                },
+            )],
+            ..Policy::empty()
+        };
+
+        // Never touched: the schedule runs. This is [CLK-7] and it must keep working.
+        let untouched = evaluate(
+            &policy,
+            &FactSet::new(),
+            &ClockSnapshot {
+                now,
+                human_input: ClockOrigin::NotYet,
+                resume: ClockOrigin::NotYet,
+            },
+        );
+        assert!(
+            untouched.suspend.due,
+            "a machine nobody has touched must still be able to go back to sleep"
+        );
+
+        // Unreadable: the same block contributes +infinity to the sleep actions.
+        let broken = evaluate(
+            &policy,
+            &FactSet::new(),
+            &ClockSnapshot {
+                now,
+                human_input: ClockOrigin::Unreadable,
+                resume: ClockOrigin::NotYet,
+            },
+        );
+        assert_eq!(broken.suspend.deadline, Deadline::Never);
+        assert!(!broken.suspend.due);
+        // ...and screen_off still lands on the boot origin, because no implicit infinity
+        // may reach it -- [FACT-40] applied to clocks.
+        assert_eq!(
+            broken.screen_off.deadline,
+            Deadline::At(BootInstant::BOOT.checked_add(secs(10 * MINUTE)).unwrap())
+        );
+        assert!(broken.screen_off.due);
+    }
+
+    /// [CLK-12]: the two absences must be distinguishable by the caller that reports them,
+    /// not merely by the caller that composes them. `origin()` flattens both to `None`;
+    /// `origin_kind()` is what `explain` and `doctor` read.
+    #[test]
+    fn origin_kind_separates_normal_absence_from_a_fault() {
+        let now = BootInstant::from_secs(HOUR);
+        let not_yet = ClockSnapshot {
+            now,
+            human_input: ClockOrigin::NotYet,
+            resume: ClockOrigin::NotYet,
+        };
+        let broken = ClockSnapshot {
+            human_input: ClockOrigin::Unreadable,
+            ..not_yet
+        };
+
+        assert_eq!(
+            not_yet.origin_kind(Clock::Resume, None),
+            ClockOrigin::NotYet
+        );
+        assert!(!not_yet.origin_kind(Clock::Resume, None).is_unreadable());
+        assert!(broken.origin_kind(Clock::HumanInput, None).is_unreadable());
+        // Both flatten to the same composition input for the sleep actions, which is why
+        // the raw variant has to survive as far as the reporting layer.
+        assert_eq!(broken.origin(Clock::HumanInput, None), None);
+        assert_eq!(not_yet.origin(Clock::Resume, None), None);
+    }
+
     /// A ceiling with an unknown origin contributes nothing at all: an origin the engine
     /// could not resolve must never be able to *cause* an action.
     #[test]
@@ -2470,8 +2637,8 @@ mod tests {
         let now = BootInstant::from_secs(10 * HOUR);
         let clocks = ClockSnapshot {
             now,
-            last_human_input: Some(now),
-            last_resume: None,
+            human_input: ClockOrigin::At(now),
+            resume: ClockOrigin::NotYet,
         };
         let policy = Policy {
             blocks: vec![block(
@@ -2513,8 +2680,8 @@ mod tests {
             &facts,
             &ClockSnapshot {
                 now: later,
-                last_human_input: Some(BootInstant::BOOT),
-                last_resume: None,
+                human_input: ClockOrigin::At(BootInstant::BOOT),
+                resume: ClockOrigin::NotYet,
             },
             &edges,
         );
@@ -2593,8 +2760,8 @@ mod tests {
         let now = BootInstant::from_secs(20 * HOUR);
         let clocks = ClockSnapshot {
             now,
-            last_human_input: Some(BootInstant::BOOT),
-            last_resume: None,
+            human_input: ClockOrigin::At(BootInstant::BOOT),
+            resume: ClockOrigin::NotYet,
         };
         let policy = Policy {
             blocks: vec![block(

@@ -53,7 +53,39 @@ zbus = { version = "5.18.0", default-features = false, features = ["async-io"] }
 async-io = "2.6.0"
 async-executor = "1.14.0"
 futures-lite = "2.6.1"
+# The rest of the smol family, for the same reason as async-io: they ARE async-io, so
+# they add no second reactor. async-process is here because `nvidia-smi` is a fork+exec
+# that takes ~100 ms, and doing that synchronously would stall the reactor that owns the
+# machine's power decision; async-net is here because the counters endpoint of [FACT-30]
+# is an HTTP GET and a blocking read on a wedged local service would do the same.
+async-net = "2.0.0"
+async-process = "2.5.0"
+async-lock = "3.4.1"
+async-channel = "2.5.0"
+# Raw syscalls without `unsafe` in this tree: CLOCK_BOOTTIME and a boottime timerfd.
+# Every crate here sets #![forbid(unsafe_code)], which is only meaningful if the libc
+# calls go through something that upholds the invariants itself.
+rustix = { version = "1.1.4", features = ["time", "fs", "pipe", "event", "process", "system"] }
 clap = { version = "4.6.4", features = ["derive"] }
+
+# --- session agent only ----------------------------------------------------------
+# These never reach idlepolicyd. The privileged half of this project links no display
+# protocol at all: it decides, and the unprivileged agent inside the session performs.
+#
+# These pull in libwayland-client.so through wayland-backend's system backend, which the
+# protocol crates re-enable through feature unification even when wayland-client is taken
+# without default features. That is accepted rather than fought: every comparable agent
+# (swayidle, hypridle) links it too, it is a core package on any distribution shipping a
+# Wayland session, and it lands only on the agent binary. idlepolicyd -- the half that can
+# turn a machine off -- links none of it and runs on a machine with no display stack at all.
+wayland-client = "0.31.14"
+wayland-protocols = { version = "0.32.12", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+# KDE's own protocols. Needed, not optional: KWin implements ext-idle-notify-v1 but NOT
+# wlr-output-power-management, so without this screen_off is unavailable on Plasma --
+# which is CachyOS's flagship desktop and the single most likely place this runs.
+wayland-protocols-plasma = { version = "0.3.12", features = ["client"] }
+x11rb = { version = "0.13.2", features = ["screensaver", "dpms"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 anyhow = "1.0.104"

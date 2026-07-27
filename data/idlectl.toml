@@ -127,7 +127,7 @@
 #  the machine suspends and never powers itself off. If you want escalation, either
 #  set `suspend = "never"` and let the deeper action own the schedule, delegate to
 #  logind's own suspend-then-hibernate, or ask for the deep action by name with
-#  `idlectl rest poweroff`.
+#  `idlectl rest --action poweroff`.
 #
 #
 #  WHEN A DETECTOR CANNOT ANSWER

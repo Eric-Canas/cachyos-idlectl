@@ -1,0 +1,111 @@
+#compdef idlectl
+#
+# zsh completion for idlectl.
+#
+# Hand-written rather than generated: generating would mean running the freshly built
+# binary during packaging, which cross-building forbids.
+
+_idlectl_actions() {
+	local -a actions=(
+		'screen_off:blank the outputs of every session that offers a mechanism'
+		'suspend:suspend to RAM'
+		'hibernate:suspend to disk'
+		'poweroff:power the machine off'
+	)
+	_describe -t actions 'action' actions
+}
+
+_idlectl_rest_actions() {
+	# screen_off is absent on purpose: "rest" means change the power state, and the
+	# daemon refuses it here.
+	local -a actions=(
+		'suspend:suspend to RAM (the default, always)'
+		'hibernate:suspend to disk'
+		'poweroff:power the machine off -- ends every session'
+	)
+	_describe -t actions 'action' actions
+}
+
+_idlectl_leases() {
+	local -a held
+	held=(${(f)"$(idlectl lease list --json 2>/dev/null |
+		sed -n 's/.*"who"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"})
+	_describe -t leases 'held lease' held
+}
+
+_idlectl() {
+	local curcontext="$curcontext" state line
+	typeset -A opt_args
+
+	_arguments -C \
+		'(-h --help)'{-h,--help}'[show help]' \
+		'(-V --version)'{-V,--version}'[show version]' \
+		'1: :->command' \
+		'*:: :->args'
+
+	case $state in
+		command)
+			local -a commands=(
+				'status:what the daemon believes and what it will do next'
+				'explain:why an action is or is not allowed, in full'
+				'doctor:which detectors work here, and what else owns this power state'
+				'rest:ask the machine to rest now'
+				'lease:hold or inspect leases -- "I am working, do not sleep"'
+				'reload:re-read the configuration without restarting'
+				'check-config:validate configuration files without contacting the daemon'
+			)
+			_describe -t commands 'idlectl command' commands
+			;;
+		args)
+			case $words[1] in
+				status|doctor)
+					_arguments '--json[emit machine-readable JSON]'
+					;;
+				explain)
+					_arguments \
+						'--json[emit machine-readable JSON]' \
+						'1:action:_idlectl_actions'
+					;;
+				rest)
+					_arguments \
+						'--action[which action to request (default: suspend)]:action:_idlectl_rest_actions' \
+						'--force[override every block, including human presence -- requires --why]' \
+						'--why[reason recorded in the journal]:reason:'
+					;;
+				reload)
+					;;
+				check-config)
+					_arguments \
+						'--json[emit machine-readable JSON]' \
+						'*:file:_files -g "*.toml"'
+					;;
+				lease)
+					local -a sub=(
+						'acquire:take a lease and hold it'
+						'release:release a lease early'
+						'list:list the leases currently held'
+					)
+					_arguments -C '1: :->leasecmd' '*:: :->leaseargs'
+					case $state in
+						leasecmd) _describe -t commands 'lease command' sub ;;
+						leaseargs)
+							case $words[1] in
+								acquire)
+									_arguments \
+										'--ttl[time to live, e.g. 30m or 6h]:duration:' \
+										'--why[reason, shown by lease list]:reason:' \
+										'1:identifier:' \
+										'*::command:_command_names -e'
+									;;
+								release) _arguments '1:identifier:_idlectl_leases' ;;
+								list)    _arguments '--json[emit machine-readable JSON]' ;;
+							esac
+							;;
+					esac
+					;;
+			esac
+			;;
+	esac
+}
+
+_idlectl "$@"
