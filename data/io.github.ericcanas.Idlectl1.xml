@@ -322,6 +322,31 @@
       The privileged half of this project therefore touches no session bus anywhere,
       which is a smaller attack surface as well as the only thing that works.
 
+      `gpu_holders` is every process of the agent's own uid that holds DRM memory, as
+      (pid, process name, bytes), already de-duplicated per DRM client id — a process
+      holding several descriptors on one client would otherwise be counted once per
+      descriptor and a 400 MiB title would read as 4 GiB.
+
+      It is reported from here for a permission reason rather than a bus one. A process's
+      fdinfo directory is mode 0555 and looks world readable, but every open is gated by
+      ptrace_may_access, so reading ANOTHER user's needs CAP_SYS_PTRACE. Measured:
+      with the daemon's CAP_DAC_READ_SEARCH the read is denied, and with CAP_SYS_PTRACE
+      the same read succeeds. Granting a daemon that can power a machine off the ability
+      to read any process's memory, in order to attribute video RAM, is not a trade worth
+      making; the agent reads its own processes with no capability at all.
+
+      The list is RAW and carries no judgement. The 512 MiB threshold, the exclusion of
+      desktop shells by name, and the attribution of memory to a running game all happen
+      in the daemon, from the process tree and the command lines, which are world
+      readable. An unprivileged process must not be the one deciding what counts as a
+      game.
+
+      An EMPTY array means this session sees no DRM memory holder, and the daemon treats
+      it exactly as it treats a machine whose DRM devices publish no memory accounting:
+      the source contributed nothing. It is never doubt. An agent that is not running at
+      all is already reported once through human_active, and raising a second veto for
+      one cause would keep every headless machine awake forever.
+
       This doubles as the liveness heartbeat. It must be called at the interval
       RegisterAgent returned even when nothing has changed, because the human-presence
       signal has to DISAPPEAR on failure: while somebody is holding a controller an
@@ -334,6 +359,8 @@
     <method name="ReportSession">
       <arg name="idle_usec" type="t" direction="in"/>
       <arg name="media_playing" type="s" direction="in"/>
+      <!-- (pid, process name, bytes) per process of this agent's uid holding DRM memory. -->
+      <arg name="gpu_holders" type="a(ust)" direction="in"/>
     </method>
 
     <!--

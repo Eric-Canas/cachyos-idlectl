@@ -621,6 +621,24 @@ the first implementation attributed a model server's 11 GiB to a running game. I
 the service's own fact vetoed independently — but it wrote a false line into the log, and a log
 that lies costs somebody an afternoon six months later.)*
 
+**[FACT-47] — the generic source is read by the session agent, not by the privileged daemon.** The
+generic, driver-independent reading of GPU memory is DRM `fdinfo` under `/proc`. A process's
+`fdinfo` directory is mode `0555` and is nevertheless gated by `ptrace_may_access`, so a privileged
+daemon needs `CAP_SYS_PTRACE` — the ability to read any process's memory — to read **another user's**.
+The session agent MUST therefore report the holders it can see in its own session, as `(pid, process
+name, bytes)` de-duplicated per DRM client id, and the daemon MUST apply [FACT-25], [FACT-26],
+[FACT-27], [FACT-28] and [FACT-29] to them itself. The reported list MUST be raw: an unprivileged
+process MUST NOT be the one deciding what counts as a game.
+
+Where no agent is reporting, this source MUST contribute nothing, exactly as if no DRM device
+published memory accounting, and MUST NOT yield `INDETERMINATE`. *(Measured: with
+`CapabilityBoundingSet=CAP_DAC_READ_SEARCH` — the daemon's one read-only capability — reading
+another user's `fdinfo` is denied, and with `CAP_SYS_PTRACE` the same read succeeds. Granting the
+component that can power a machine off the ability to read any process's memory, so that video RAM
+can be attributed, is the wrong trade; the agent needs no capability at all for the same data.
+Doubt on an absent agent would be a second veto for a cause [HUM-4] already reports once, and would
+freeze every headless machine awake — where `nvidia-smi`, which needs no session, still answers.)*
+
 #### 5.3.11 `local_service_busy`
 
 A long-running local service that is *up* is not a long-running local service that is *in use*.
@@ -955,8 +973,14 @@ NOT raise a doubt veto on anything, by [FACT-43] applied to actions.
 ### 8.7 Privilege and state
 
 **[ACT-10]** The daemon runs privileged and reads state written by unprivileged callers (leases,
-agent heartbeats). All such state MUST be parsed with an explicit parser, MUST be range- and
-type-checked, and MUST NOT be executed, sourced or interpolated into a shell.
+agent heartbeats, the GPU memory holders of [FACT-47]). All such state MUST be parsed with an
+explicit parser, MUST be range- and type-checked, MUST be bounded in length, and MUST NOT be
+executed, sourced or interpolated into a shell.
+
+None of it can make the machine sleep. A holder an agent reports only ever adds a reason to stay
+awake, so the worst a hostile agent achieves with it is a machine that stays on — the cheap error of
+[MODEL-1] — and the length bound is what stops it also being an unbounded allocation inside the
+daemon.
 
 **[ACT-11]** Runtime state directories MUST be created with explicit ownership and mode by a
 declarative mechanism (on systemd: `tmpfiles.d`), not lazily by whichever process gets there first.
@@ -2038,6 +2062,7 @@ for removal, the measurement is the thing to re-run first.
 | [FACT-18] | A veto built on desktop inhibition APIs that report empty while an inhibit is held. |
 | [FACT-23], [OBS-2] | A correct decision reported with a misleading number. |
 | [FACT-25], [FACT-27], [FACT-29] | A soft game veto unreachable behind an undifferentiated GPU veto; a log line attributing a service's memory to a game. |
+| [FACT-47] | A GPU source that sees nothing because the daemon may not read another user's `fdinfo`, and the "fix" that hands a power daemon the right to read any process's memory. |
 | [FACT-30]–[FACT-35] | "Running" mistaken for "in use", pinning ~12 GiB of VRAM all night. |
 | [ACT-1] | A shutdown path that ignores everything, and its alternative that never fires. |
 | [ACT-3] | An intermittent bug masked by a race that happened to save it. |

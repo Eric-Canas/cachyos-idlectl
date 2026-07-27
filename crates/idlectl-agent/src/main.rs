@@ -2,8 +2,8 @@
 //!
 //! # What it is for
 //!
-//! Two things a root daemon cannot do, both because they are properties of a *session*
-//! rather than of the machine:
+//! Four things a root daemon cannot do, every one of them because it is a property of a
+//! *session* or of a *uid* rather than of the machine:
 //!
 //! 1. **Observe real human input.** On Wayland only the compositor knows, and it tells
 //!    nobody who has not asked through `ext-idle-notify-v1`; on X11 the server maintains
@@ -11,22 +11,31 @@
 //! 2. **Read MPRIS.** A root daemon cannot connect to a user's session bus at all —
 //!    measured, the bus authenticates by uid over `EXTERNAL` and closes the connection,
 //!    and no amount of file permission changes that. See [`mpris`].
-//! 3. **Blank the screen.** On Wayland only the compositor, or whoever holds DRM master,
+//! 3. **Read DRM `fdinfo`.** `/proc/<pid>/fdinfo` is mode 0555 and still gated by
+//!    `ptrace_may_access`, so reading another user's needs `CAP_SYS_PTRACE` -- measured,
+//!    the read is denied with the daemon's `CAP_DAC_READ_SEARCH` and succeeds with
+//!    `CAP_SYS_PTRACE`. Granting a daemon that can power the machine off the ability to
+//!    read any process's memory, in order to attribute video RAM, is not a trade worth
+//!    making. Here the processes belong to this uid and no capability is needed at all.
+//!    See [`gpu`].
+//! 4. **Blank the screen.** On Wayland only the compositor, or whoever holds DRM master,
 //!    can turn an output off, and a root daemon has no business being either.
 //!
-//! The third is the only one that is not reporting. The agent commands nothing but its own
-//! screen, and only when the caller is the daemon.
+//! The fourth is the only one that is not reporting. The agent commands nothing but its
+//! own screen, and only when the caller is the daemon.
 //!
 //! # What it is not for
 //!
 //! Everything else. The agent cannot suspend, hibernate or power off anything, and no
-//! configuration can give it those. It reports two session-scoped facts and commands
-//! nothing but its own screen, and only when the caller is the daemon — the bus policy
-//! restricts its interface to uid 0.
+//! configuration can give it those. It reports three session-scoped observations and
+//! commands nothing but its own screen, and only when the caller is the daemon — the bus
+//! policy restricts its interface to uid 0.
 //!
-//! In particular it does NOT attribute GPU load or look for running games. Those are read
-//! from `/proc` by the daemon, which is privileged and does not have to take an
-//! unprivileged process's word for what is running on the machine.
+//! In particular it does NOT attribute GPU memory to a game. It reports raw holders -- pid,
+//! name, bytes -- and the daemon decides what they mean, from the process tree and the
+//! command lines, which are world-readable and which it reads with no capability at all.
+//! An unprivileged process is the wrong place to decide what counts as a game, and the
+//! daemon does not have to take its word for what is running on the machine.
 //!
 //! Two guards make that hold in practice rather than on paper. The agent owns **no
 //! well-known bus name**, so an ordinary user cannot squat the interface by claiming one;
@@ -45,6 +54,7 @@
 #![forbid(unsafe_code)]
 
 mod backend;
+mod gpu;
 mod mpris;
 mod wayland;
 mod x11;
@@ -72,7 +82,14 @@ const AGENT_PATH: &str = "/io/github/ericcanas/Idlectl1/Agent";
 trait Manager {
     /// Returns the interval, in microseconds, at which `ReportSession` must be called.
     fn register_agent(&self, session_id: &str, can_blank: bool) -> zbus::Result<u64>;
-    fn report_session(&self, idle_usec: u64, media_playing: &str) -> zbus::Result<()>;
+    /// `gpu_holders` is `a(ust)`: pid, process name, bytes, one entry per process of this
+    /// uid that holds DRM memory. Raw and unattributed; the daemon classifies them.
+    fn report_session(
+        &self,
+        idle_usec: u64,
+        media_playing: &str,
+        gpu_holders: &[gpu::Holder],
+    ) -> zbus::Result<()>;
     #[allow(dead_code)]
     fn unregister_agent(&self) -> zbus::Result<()>;
 }
@@ -179,6 +196,13 @@ fn run(args: Args) -> Result<()> {
                 Idle::Unknown => "unknown (the idle protocol is not answering)".to_owned(),
             }
         );
+        // The other half of "can this session do it at all?": the GPU facts are blind
+        // without this list, and an empty one here is the whole explanation for a
+        // `gpu_busy_*` that reads unavailable on a machine with an AMD or Intel card.
+        println!(
+            "gpu       {} process(es) publishing DRM memory",
+            gpu::read().len()
+        );
         return Ok(());
     }
 
@@ -256,6 +280,10 @@ async fn serve(backend: Arc<dyn Backend>) -> Result<()> {
     loop {
         let idle = backend.idle();
         let (media, media_detail) = mpris::read().await;
+        // Sampled on the heartbeat like everything else here, and cheap for the same
+        // reason the daemon's walk was: a `read_dir` of /proc plus one open per descriptor
+        // of the processes this uid owns. Every other process fails the open immediately.
+        let holders = gpu::read();
 
         // One log line per transition into the broken state, not one per report. A session
         // whose protocol died would otherwise write a line every thirty seconds for as
@@ -270,7 +298,10 @@ async fn serve(backend: Arc<dyn Backend>) -> Result<()> {
             last_state = Some(broken);
         }
 
-        if let Err(err) = manager.report_session(idle.to_usec(), media).await {
+        if let Err(err) = manager
+            .report_session(idle.to_usec(), media, &holders)
+            .await
+        {
             // A daemon that restarted has forgotten this agent, and the report is refused
             // with "this connection has not registered". Re-registering is the whole of
             // the recovery: nothing here holds state worth preserving across it.

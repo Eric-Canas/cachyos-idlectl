@@ -406,8 +406,8 @@ Facts shipped in v1:
 | `media_playing`      | MPRIS playback status                                                                            |
 | `steam_game_running` | a Steam game process tree — the game, not merely the Steam client                                 |
 | `steam_downloading`  | recent writes under Steam's staging tree, not a network-throughput threshold                     |
-| `gpu_busy_game`      | GPU memory held by a process in a running game's ancestry                                        |
-| `gpu_busy_other`     | GPU memory held by anything not attributable to a game                                           |
+| `gpu_busy_game`      | GPU memory held by a process in a running game's ancestry — DRM `fdinfo` via the session agent, merged with `nvidia-smi` |
+| `gpu_busy_other`     | the same reading, held by anything not attributable to a game                                    |
 | `local_service_busy` | a long-running local service, measured by **cumulative counters**, not by `systemctl is-active`  |
 
 `always` is the only built-in condition. Everything else in that table, `after_resume` included, is
@@ -420,6 +420,16 @@ the settle window does. Pair it with `clock = "resume"` and it *is* the settle w
 process ancestry — never by an executable allowlist — so a game keeps a soft, finite floor while
 unattributed GPU load keeps its own. The compositor is excluded by name, not merely by falling under
 the memory threshold.
+
+Both facts read **two sources and merge them**, never one falling back to the other: DRM `fdinfo`,
+which is generic across amdgpu/i915/xe/nouveau, and `nvidia-smi`, because the proprietary NVIDIA
+driver publishes no memory accounting in `fdinfo` at all. On a hybrid machine a fallback chain sees
+the integrated GPU's keys, concludes the generic source works, and never asks the card the games run
+on. The `fdinfo` half is read by the **session agent** and reported: that path is gated by
+`ptrace_may_access`, so a root daemon would need `CAP_SYS_PTRACE` — the right to read any process's
+memory — to see another user's, and it does not get one to attribute video RAM. The agent reports
+raw holders; the daemon attributes them. With no agent running, `nvidia-smi` still answers and the
+`fdinfo` half simply contributes nothing; it never becomes doubt.
 
 `local_service_busy` earns its own paragraph. "The service is running" is not "the service is in
 use". A local model server sitting idle all night holding 12 GB of VRAM is not the machine being
@@ -590,9 +600,13 @@ hibernate or power off. It opens no network sockets, ships no setuid binaries, a
 command line built out of data it did not author.
 
 **What runs unprivileged.** `idlectl-agent`, one instance per graphical session, as the session
-user. Everything that needs session context lives there: compositor idle notification, MPRIS, Steam
-detection. The agent **reports facts and cannot command actions** — with exactly one exception,
-stated here rather than buried, because the OLED story depends on it.
+user. Everything the root daemon cannot reach lives there: compositor idle notification, MPRIS
+playback status, and the DRM `fdinfo` reading of which processes hold GPU memory — that last one
+because `fdinfo` is gated by `ptrace_may_access`, so the daemon would need `CAP_SYS_PTRACE` to read
+another user's, and reading any process's memory is not a power on a power daemon. What the agent
+sends is raw: the daemon does the attribution, from the process tree and the command lines, which
+are world-readable. The agent **reports facts and cannot command actions** — with exactly one
+exception, stated here rather than buried, because the OLED story depends on it.
 
 **The one exception: `screen_off`.** No root process can blank a Wayland output; only the
 compositor, or whoever holds DRM master, can. So the agent exposes `Blank`/`Unblank` on the system

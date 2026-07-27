@@ -16,7 +16,8 @@
 //!
 //! # Two sources, MERGED — not a fallback chain
 //!
-//! DRM `fdinfo` is generic (amdgpu, i915, xe, nouveau), is read from `/proc` with no fork,
+//! DRM `fdinfo` is generic (amdgpu, i915, xe, nouveau), is read from `/proc` with no fork
+//! -- by the session agent rather than by this daemon, for the permission reason below --
 //! and is what the graphical process monitors use. The proprietary NVIDIA driver publishes
 //! `drm-driver` and a client id and **no memory accounting at all**, so it can only be
 //! read through `nvidia-smi` — a fork and roughly 100 ms, which is why it is awaited
@@ -39,8 +40,30 @@
 //! Present but failing is `INDETERMINATE`, which vetoes. `nvidia-smi` reporting *no
 //! devices* is `UNAVAILABLE`, not a failure: a machine with the driver package installed
 //! and no card in it must still be allowed to sleep.
-
-use std::collections::HashMap;
+//!
+//! # Why only one of those two sources is read here
+//!
+//! The `fdinfo` half is **reported by the session agents** and arrives in the
+//! [`Context`](super::Context); only `nvidia-smi` is run from this process. A process's
+//! `fdinfo` directory is mode 0555 and looks world-readable, but every open is gated by
+//! `ptrace_may_access`, so reading **another user's** needs `CAP_SYS_PTRACE`. Measured:
+//! with this daemon's `CapabilityBoundingSet=CAP_DAC_READ_SEARCH` the read is denied, and
+//! with `CAP_SYS_PTRACE` the same read succeeds. That capability is the ability to read
+//! any process's memory, and a daemon that can power a machine off is not getting one in
+//! order to attribute video RAM. The agent runs as the session user, reads its own
+//! processes with no capability at all, and reports pid, name and bytes.
+//!
+//! Attribution stays here, and that is the whole division: deciding whether a holder
+//! belongs to a game needs the process tree and the command lines, which are
+//! world-readable and cost no capability, and an unprivileged process must not be the one
+//! that decides what counts as a game. The same split as `media_playing` -- the agent
+//! observes what only it can observe, the daemon decides what it means.
+//!
+//! With no agent running, the `fdinfo` source contributes nothing, exactly as if no DRM
+//! device published memory accounting. Never `INDETERMINATE`: an absent agent is already
+//! reported once through `human_active`, and vetoing twice for one cause would hold every
+//! sleep action on a headless machine forever -- where `nvidia-smi`, which needs no
+//! session, still answers.
 
 use idlectl_policy::FactState;
 
@@ -89,22 +112,28 @@ pub struct Split {
 }
 
 /// One process holding GPU memory.
-struct Holder {
-    pid: u32,
-    name: String,
-    bytes: u64,
+///
+/// Public because the session agents report these and the registry stores them until an
+/// evaluation asks for them. The bytes are raw: the 512 MiB threshold and the desktop
+/// exclusion are applied here, in [`read`], and never by whoever reported the holder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Holder {
+    pub pid: u32,
+    pub name: String,
+    pub bytes: u64,
 }
 
 /// Reads the GPU and splits the result by attribution.
 ///
-/// `game_running` and `service` are inputs rather than things this function derives:
-/// attribution needs to know what a game is ([FACT-28]) and what a tracked service is
-/// ([FACT-29]), and both are already computed next door.
+/// `reported`, `game_running` and `service` are inputs rather than things this function
+/// derives: the DRM `fdinfo` holders can only be read inside a session (see the module
+/// note), and attribution needs to know what a game is ([FACT-28]) and what a tracked
+/// service is ([FACT-29]) -- all three are already computed next door.
 ///
-/// There is deliberately no `Context` parameter: [FACT-25] pins the threshold as a
-/// compiled-in constant, so these two facts have nothing an operator can configure and
-/// nothing to read a setting from.
-pub async fn read(game_running: bool, service: &Reading) -> Split {
+/// There is deliberately no `Context` parameter even though `reported` comes from one:
+/// [FACT-25] pins the threshold as a compiled-in constant, so these two facts have nothing
+/// an operator can configure and nothing to read a setting from.
+pub async fn read(reported: &[Holder], game_running: bool, service: &Reading) -> Split {
     let procs = proc::snapshot();
     if procs.is_empty() {
         let doubt = Reading::doubt("/proc could not be read");
@@ -127,10 +156,13 @@ pub async fn read(game_running: bool, service: &Reading) -> Split {
     let mut holders = Vec::new();
     let mut sources = Vec::new();
 
-    let fdinfo = read_fdinfo(&procs);
-    if let Some(found) = fdinfo {
-        sources.push("DRM fdinfo");
-        holders.extend(found);
+    // Empty means the source saw nothing: no agent is running, or the DRM devices publish
+    // no memory accounting. Both are the absence of a reading and neither is doubt, so the
+    // source is simply not listed -- exactly what happened before when the walk lived here
+    // and returned `None`.
+    if !reported.is_empty() {
+        sources.push("DRM fdinfo via the session agent");
+        holders.extend(reported.iter().cloned());
     }
 
     match read_nvidia_smi().await {
@@ -237,101 +269,6 @@ fn in_system_slice(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// Sums per-process GPU memory from DRM `fdinfo`.
-///
-/// Returns [`None`] when no process published a DRM **memory** key, which is how the
-/// proprietary NVIDIA driver presents: it exposes `drm-driver` and a client id and no
-/// memory accounting at all. Keying the answer on `drm-driver` alone would report every
-/// process as holding zero bytes and call that a successful reading.
-///
-/// # De-duplication
-///
-/// A process holding several file descriptors on the same DRM client reports the same
-/// memory once per descriptor. Summing naively multiplies a game's memory by its
-/// descriptor count and turns a 400 MiB title into a 4 GiB one. `drm-client-id` is the
-/// identity that must be de-duplicated on.
-fn read_fdinfo(procs: &[proc::Process]) -> Option<Vec<Holder>> {
-    let mut saw_memory_key = false;
-    let mut out = Vec::new();
-
-    for p in procs {
-        let Ok(fds) = std::fs::read_dir(format!("/proc/{}/fdinfo", p.pid)) else {
-            continue;
-        };
-        // client id -> bytes, so several descriptors on one client count once.
-        let mut clients: HashMap<u64, u64> = HashMap::new();
-
-        for fd in fds.flatten() {
-            let Ok(text) = std::fs::read_to_string(fd.path()) else {
-                continue;
-            };
-            if !text.contains("drm-driver") {
-                continue;
-            }
-
-            let mut client_id = None;
-            let mut vram = 0u64;
-            let mut gtt = 0u64;
-            for line in text.lines() {
-                let Some((key, value)) = line.split_once(':') else {
-                    continue;
-                };
-                let value = value.trim();
-                match key.trim() {
-                    "drm-client-id" => client_id = value.parse::<u64>().ok(),
-                    // `resident` is what is actually in device memory; `memory` is the
-                    // older spelling of the same idea. Whichever the driver publishes.
-                    "drm-resident-vram" | "drm-memory-vram" => {
-                        saw_memory_key = true;
-                        vram = vram.max(parse_size(value));
-                    }
-                    "drm-resident-gtt" | "drm-memory-gtt" => {
-                        saw_memory_key = true;
-                        gtt = gtt.max(parse_size(value));
-                    }
-                    _ => {}
-                }
-            }
-            // On an integrated GPU there is no dedicated video memory at all, so fall
-            // back to the shared aperture rather than reporting zero for every process.
-            let bytes = if vram > 0 { vram } else { gtt };
-            if let Some(id) = client_id {
-                let slot = clients.entry(id).or_default();
-                *slot = (*slot).max(bytes);
-            }
-        }
-
-        let total: u64 = clients.values().sum();
-        if total > 0 {
-            out.push(Holder {
-                pid: p.pid,
-                name: p.name().to_owned(),
-                bytes: total,
-            });
-        }
-    }
-
-    saw_memory_key.then_some(out)
-}
-
-/// Parses a `fdinfo` size, which is written as a number and a unit (`"16384 KiB"`).
-fn parse_size(value: &str) -> u64 {
-    let mut parts = value.split_whitespace();
-    let Some(number) = parts.next().and_then(|n| n.parse::<u64>().ok()) else {
-        return 0;
-    };
-    let multiplier = match parts.next() {
-        Some("KiB") => 1024,
-        Some("MiB") => 1024 * 1024,
-        Some("GiB") => 1024 * 1024 * 1024,
-        // The kernel documents KiB as the unit; a bare number is assumed to follow it
-        // rather than to be bytes, because reading 16384 as bytes would silently put every
-        // process under the threshold.
-        _ => 1024,
-    };
-    number.saturating_mul(multiplier)
-}
-
 enum NvidiaResult {
     Holders(Vec<Holder>),
     /// No such tool on this machine.
@@ -427,14 +364,39 @@ mod tests {
         assert!(parse_nvidia_csv("only-one-field\n").is_err());
     }
 
+    /// The two sources are merged per process by taking the larger reading, never the sum.
+    /// A process can legitimately appear on two GPUs, and adding the two would report
+    /// memory it does not hold -- [FACT-25] asks "does this process hold half a gigabyte
+    /// somewhere", not "how much in total".
     #[test]
-    fn fdinfo_sizes_default_to_kib() {
-        assert_eq!(parse_size("16384 KiB"), 16 * 1024 * 1024);
-        assert_eq!(parse_size("2 MiB"), 2 * 1024 * 1024);
-        // The kernel documents KiB; reading a bare number as bytes would put every
-        // process under the threshold and silently disable both facts.
-        assert_eq!(parse_size("1048576"), 1024 * 1024 * 1024);
-        assert_eq!(parse_size("nonsense"), 0);
+    fn a_process_seen_by_both_sources_is_not_counted_twice() {
+        let mut holders = vec![Holder {
+            pid: 42,
+            name: "game".into(),
+            bytes: 600 * 1024 * 1024,
+        }];
+        merge(
+            &mut holders,
+            vec![
+                Holder {
+                    pid: 42,
+                    name: "game".into(),
+                    bytes: 700 * 1024 * 1024,
+                },
+                Holder {
+                    pid: 43,
+                    name: "other".into(),
+                    bytes: 100 * 1024 * 1024,
+                },
+            ],
+        );
+        assert_eq!(holders.len(), 2);
+        assert_eq!(
+            holders[0].bytes,
+            700 * 1024 * 1024,
+            "the larger, not the sum"
+        );
+        assert_eq!(holders[1].pid, 43);
     }
 
     /// [FACT-26], asserted rather than assumed: the microcompositor is a game's process

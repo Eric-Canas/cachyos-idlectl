@@ -224,6 +224,7 @@ impl Engine {
             leases: self.leases.summary(),
             human_active: human,
             media_playing: self.agents.media(now),
+            gpu_holders: self.agents.gpu_holders(now),
             after_resume: self.resume.after_resume(),
             excluded_sessions: &[],
         };

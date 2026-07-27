@@ -6,20 +6,28 @@
 #
 #     systemctl --user enable --now idlectl-agent.service
 #
-# It reports two things and it never decides:
+# It reports three things and it never decides:
 #
 #   * how long this session has been idle, from ext-idle-notify-v1 on Wayland or the
 #     MIT-SCREEN-SAVER counter on X11;
-#   * whether an MPRIS player in this session is playing.
+#   * whether an MPRIS player in this session is playing;
+#   * which of this session's processes hold GPU memory, from DRM fdinfo under /proc.
 #
-# Both are session-scoped and neither is reachable from outside the session. The second
-# is not a stylistic choice: A ROOT DAEMON CANNOT CONNECT TO A USER SESSION BUS. The
-# connection is accepted at the socket and then closed during authentication, because a
-# session bus serves exactly one uid, and no file permission changes that.
+# None of the three is reachable from outside the session, and the last two are not
+# stylistic choices. A ROOT DAEMON CANNOT CONNECT TO A USER SESSION BUS: the connection
+# is accepted at the socket and then closed during authentication, because a session bus
+# serves exactly one uid, and no file permission changes that. And /proc/<pid>/fdinfo is
+# mode 0555 yet still gated by ptrace_may_access, so reading ANOTHER user's needs
+# CAP_SYS_PTRACE -- measured: denied with the daemon's CAP_DAC_READ_SEARCH, granted with
+# CAP_SYS_PTRACE. Handing the component that can power the machine off the right to read
+# any process's memory, so that video RAM can be attributed, is not a trade worth making.
+# Here the processes are this uid's own and no capability is needed at all.
 #
-# It does NOT attribute GPU load or look for running games. The daemon reads /proc for
-# itself; putting those here would mean trusting an unprivileged process's claims about
-# what is running on the machine, and there is no reason to.
+# What it sends is RAW: pid, process name, bytes. It does NOT attribute GPU memory to a
+# game and does not look for running games. The daemon does that from the process tree
+# and the command lines, which are world-readable; putting it here would mean trusting an
+# unprivileged process's claims about what is running on the machine, and there is no
+# reason to.
 #
 # IT ACTS IN EXACTLY ONE WAY, AND THAT IS THE SCREEN.
 #

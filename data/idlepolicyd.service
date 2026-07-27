@@ -127,9 +127,16 @@ NoNewPrivileges=yes
 # daemon the ability to read any process's memory to attribute video RAM is not a trade
 # worth making; the session agent reads its own processes' fdinfo instead, with no
 # capability at all.
+#
+# No AmbientCapabilities= line. The unit had one, empty, from when the bounding set was
+# empty too, and an `AmbientCapabilities=CAP_DAC_READ_SEARCH` added above it would have
+# been silently cancelled by the empty assignment that followed. It made no difference
+# either way -- this service runs as uid 0, and a root process takes its effective set
+# from the bounding set, so ambient capabilities are only meaningful for a unit with
+# User= set -- but two lines contradicting each other in a file about privilege is worth
+# neither. Verified on the running daemon: CapEff 0000000000000004, which is
+# CAP_DAC_READ_SEARCH and nothing else.
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH
-AmbientCapabilities=CAP_DAC_READ_SEARCH
-AmbientCapabilities=
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 RestrictNamespaces=yes
@@ -256,8 +263,8 @@ SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources @mount @debug @obsolete @reboot @swap @cpu-emulation
 
 # Rust binary; nothing here JITs. It applies to children too, which matters: the GPU
-# facts fall back to running `nvidia-smi` where DRM fdinfo is unavailable, and that
-# loads the proprietary NVML. If nvidia-smi ever fails under this unit with an error
+# facts run `nvidia-smi` on every reading -- merged with the DRM fdinfo the session agent
+# reports, never as a fallback for it -- and that loads the proprietary NVML. If nvidia-smi ever fails under this unit with an error
 # that makes no sense while working fine by hand, this is the first line to test with,
 # and the symptom to expect is gpu_busy_* reading `indeterminate` -- which vetoes, so
 # the machine stays awake rather than sleeping on a bad reading.

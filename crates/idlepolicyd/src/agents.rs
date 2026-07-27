@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use idlectl_policy::{BootInstant, ClockOrigin};
 
+use crate::facts::gpu::Holder;
 use crate::facts::{Reading, ago};
 
 /// How long an agent may go quiet before its reports are treated as stale.
@@ -63,6 +64,14 @@ pub struct Agent {
     /// What the agent last said about MPRIS playback in its session, in the four-name
     /// state vocabulary. Empty before the first report.
     pub media: String,
+    /// The processes in this agent's session that hold DRM memory, as it last reported
+    /// them. Raw: pid, name and bytes, with no threshold and no attribution applied.
+    ///
+    /// Empty before the first report, and empty is the right starting value here where it
+    /// would be wrong for `media`: an empty list adds no reason to stay awake and raises
+    /// no veto, so an agent that has not spoken yet contributes nothing rather than a
+    /// claim. `human_active` is what makes a silent agent visible.
+    pub gpu_holders: Vec<Holder>,
     /// When the last report arrived. Staleness is measured from here.
     pub last_report: BootInstant,
 }
@@ -108,6 +117,7 @@ impl Registry {
         unique_name: &str,
         idle_usec: u64,
         media: &str,
+        gpu_holders: Vec<Holder>,
         now: BootInstant,
     ) -> bool {
         let Some(agent) = self.agents.get_mut(unique_name) else {
@@ -115,8 +125,38 @@ impl Registry {
         };
         agent.idle = (idle_usec != IDLE_UNKNOWN).then(|| Duration::from_micros(idle_usec));
         agent.media = media.to_owned();
+        agent.gpu_holders = gpu_holders;
         agent.last_report = now;
         true
+    }
+
+    /// Every DRM memory holder the live agents can see, de-duplicated by pid.
+    ///
+    /// The `fdinfo` half of the two GPU facts, folded the way `media` is folded and with
+    /// the same staleness rule: an agent whose heartbeat has aged out has observed nothing
+    /// recent, and a holder it reported two minutes ago is not evidence that the process
+    /// still exists.
+    ///
+    /// No live agent is an empty list and never doubt. That is the same choice as `media`,
+    /// for the same reason: the daemon cannot read `fdinfo` itself ([`crate::facts::gpu`]),
+    /// so an agentless machine has no reading rather than a broken one, and the missing
+    /// agent is already reported once by `human_active`.
+    ///
+    /// De-duplicated by pid taking the larger reading, matching how the daemon merges
+    /// `nvidia-smi`: a pid is one process holding one amount of memory, and two reports of
+    /// it are two views of the same thing rather than two allocations.
+    #[must_use]
+    pub fn gpu_holders(&self, now: BootInstant) -> Vec<Holder> {
+        let mut out: Vec<Holder> = Vec::new();
+        for agent in self.agents.values().filter(|a| !a.stale_at(now)) {
+            for holder in &agent.gpu_holders {
+                match out.iter_mut().find(|seen| seen.pid == holder.pid) {
+                    Some(seen) => seen.bytes = seen.bytes.max(holder.bytes),
+                    None => out.push(holder.clone()),
+                }
+            }
+        }
+        out
     }
 
     /// The `media_playing` fact, folded across every live agent.
@@ -295,7 +335,16 @@ mod tests {
             can_blank: true,
             idle,
             media: "false".to_owned(),
+            gpu_holders: Vec::new(),
             last_report: BootInstant::from_secs(last_report),
+        }
+    }
+
+    fn holder(pid: u32, mib: u64) -> Holder {
+        Holder {
+            pid,
+            name: format!("proc{pid}"),
+            bytes: mib * 1024 * 1024,
         }
     }
 
@@ -379,6 +428,73 @@ mod tests {
             idlectl_policy::FactState::False,
             "280 + 30 > 300"
         );
+    }
+
+    /// Two seats, two agents, and each one can only see its own processes -- which is the
+    /// whole reason this fact is reported rather than read. Losing one session's holders
+    /// here loses the GPU memory of whatever is running in it, and the machine suspends
+    /// with a game on the other seat.
+    #[test]
+    fn gpu_holders_are_folded_across_every_live_agent() {
+        let mut reg = Registry::default();
+        let mut first = agent("c2", Some(Duration::ZERO), 1000);
+        first.gpu_holders = vec![holder(10, 600)];
+        let mut second = agent("c3", Some(Duration::ZERO), 1000);
+        second.gpu_holders = vec![holder(20, 900)];
+        reg.register(":1.5".into(), first);
+        reg.register(":1.6".into(), second);
+
+        let mut holders = reg.gpu_holders(BootInstant::from_secs(1000));
+        holders.sort_by_key(|h| h.pid);
+        assert_eq!(holders.len(), 2);
+        assert_eq!(holders[0].pid, 10);
+        assert_eq!(holders[1].bytes, 900 * 1024 * 1024);
+    }
+
+    /// One pid reported by two agents is one process, not two allocations. Summing would
+    /// double a game's memory and could push a process over the 512 MiB threshold that is
+    /// nowhere near it.
+    #[test]
+    fn one_pid_reported_twice_is_folded_to_the_larger_reading() {
+        let mut reg = Registry::default();
+        let mut first = agent("c2", Some(Duration::ZERO), 1000);
+        first.gpu_holders = vec![holder(10, 300)];
+        let mut second = agent("c3", Some(Duration::ZERO), 1000);
+        second.gpu_holders = vec![holder(10, 400)];
+        reg.register(":1.5".into(), first);
+        reg.register(":1.6".into(), second);
+
+        let holders = reg.gpu_holders(BootInstant::from_secs(1000));
+        assert_eq!(holders.len(), 1, "one pid is one process");
+        assert_eq!(holders[0].bytes, 400 * 1024 * 1024);
+    }
+
+    /// A dead agent's last report is not evidence about the machine now. Keeping its
+    /// holders would pin a machine awake on the memory of a process that exited with the
+    /// session -- and nothing would ever contradict the reading, because the agent that
+    /// would have said so is gone.
+    #[test]
+    fn a_stale_agent_contributes_no_gpu_holders() {
+        let mut reg = Registry::default();
+        let mut live = agent("c2", Some(Duration::ZERO), 1000);
+        live.gpu_holders = vec![holder(10, 600)];
+        let mut dead = agent("c3", Some(Duration::ZERO), 0);
+        dead.gpu_holders = vec![holder(20, 9000)];
+        reg.register(":1.5".into(), live);
+        reg.register(":1.6".into(), dead);
+
+        let holders = reg.gpu_holders(BootInstant::from_secs(1000));
+        assert_eq!(holders.len(), 1);
+        assert_eq!(holders[0].pid, 10, "only the agent still reporting counts");
+    }
+
+    /// An agentless machine has no `fdinfo` reading, which is not the same as a broken
+    /// one. Doubt here would veto every sleep action on every headless box, for a cause
+    /// `human_active` already reports once.
+    #[test]
+    fn no_agent_means_no_holders_and_not_doubt() {
+        let reg = Registry::default();
+        assert!(reg.gpu_holders(BootInstant::from_secs(1000)).is_empty());
     }
 
     #[test]

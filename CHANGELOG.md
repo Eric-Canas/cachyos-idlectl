@@ -13,15 +13,44 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 ## [Unreleased]
 
-### Known
+Nothing yet.
 
-- **The DRM `fdinfo` GPU source sees nothing outside the daemon's own processes.**
-  `/proc/<pid>/fdinfo` is mode `0555` and still gated by `ptrace_may_access`, so reading another
-  user's requires `CAP_SYS_PTRACE` — which a daemon that can turn a machine off is not getting, since
-  it also grants reading any process's memory. On NVIDIA hardware `nvidia-smi` covers the same ground
-  and nothing is lost; on an AMD or Intel machine, where `fdinfo` is the only source, both GPU facts
-  are blind. The fix is to have the session agent read its own processes' `fdinfo` and report them,
-  the way `media_playing` already works, and it is not done here.
+## [0.2.0] - 2026-07-27
+
+### Changed
+
+- **The DRM `fdinfo` GPU source moved from the daemon to the session agent, and `ReportSession`
+  gained an argument.** `/proc/<pid>/fdinfo` is mode `0555` and still gated by `ptrace_may_access`,
+  so reading *another user's* needs `CAP_SYS_PTRACE` — measured: denied under the daemon's
+  `CAP_DAC_READ_SEARCH`, granted with `CAP_SYS_PTRACE`. Handing the component that can power a
+  machine off the right to read any process's memory, so that video RAM can be attributed, is not a
+  trade worth making. The agent runs as the session user, reads its own processes, and needs no
+  capability at all — the same argument that already put `media_playing` there.
+
+  Left as it was on purpose: **both GPU sources are still read and merged**, never one falling back
+  to the other, because on a hybrid machine the integrated GPU publishes `fdinfo` for trivia while
+  the discrete card publishes none. And **attribution stays in the daemon** — deciding whether a
+  holder belongs to a game needs the process tree and command lines, which are world-readable, and
+  an unprivileged process's claims about what is running on the machine are not something to take on
+  trust. The agent reports raw `(pid, name, bytes)`; the daemon classifies.
+
+  Where no agent runs, the source contributes nothing, exactly as if no DRM device published memory.
+  It deliberately does not read `indeterminate`: an absent agent is already reported through
+  `human_active`, and saying it twice would veto every sleep action on a headless machine.
+
+  **Migration:** none for configuration files. The D-Bus method
+  `io.github.ericcanas.Idlectl1.Manager.ReportSession` is now `(t idle_usec, s media_playing,
+  a(ust) gpu_holders)`. Both binaries ship in the same package and are always upgraded together;
+  a third-party agent implementing the old signature must add the argument.
+
+### Fixed
+
+- **Two contradictory `AmbientCapabilities=` lines in `idlepolicyd.service`.** The unit carried an
+  empty assignment from when the bounding set was empty too, so an `AmbientCapabilities=` added
+  above it would have been silently cancelled by the reset below. It changed nothing in practice —
+  the service runs as uid 0, which takes its effective set from the bounding set — but a file about
+  privilege should not contain two lines disagreeing with each other. Verified on the running
+  daemon: `CapEff 0000000000000004`.
 
 ## [0.1.4] - 2026-07-27
 
@@ -213,7 +242,8 @@ reasoned about — the notes below record what that verification changed.
 - `TESTING.md` with the manual suspend/resume protocol, including the normative resume case, and an
   explicit account of what CI cannot cover.
 
-[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.1...v0.1.2

@@ -21,10 +21,22 @@ use zbus::zvariant::OwnedFd;
 
 use crate::agents::{Agent, HEARTBEAT_INTERVAL};
 use crate::engine::Engine;
+use crate::facts::gpu::Holder;
 use crate::polkit;
 
 pub const BUS_NAME: &str = "io.github.ericcanas.Idlectl1";
 pub const OBJECT_PATH: &str = "/io/github/ericcanas/Idlectl1";
+
+/// How many GPU memory holders one agent may report, and how long each name may be.
+///
+/// [ACT-10]: state written by an unprivileged caller is parsed explicitly and bounded.
+/// Nothing an agent reports here can make the machine sleep -- a holder only ever adds a
+/// reason to stay awake -- but an agent reporting a million of them, or one whose "process
+/// name" is a megabyte of text, would grow this daemon's memory and its log lines without
+/// limit. Both bounds are far above any real machine: a session has a handful of processes
+/// holding GPU memory, and a process name is a filename.
+const MAX_HOLDERS: usize = 256;
+const MAX_HOLDER_NAME: usize = 64;
 
 pub struct Manager {
     pub engine: Arc<Mutex<Engine>>,
@@ -387,6 +399,10 @@ impl Manager {
                 // Empty, not "false": the same rule, for the same reason. Nothing has been
                 // observed about this session's media yet.
                 media: String::new(),
+                // Empty is correct here rather than a claim: an empty holder list adds no
+                // reason to stay awake and raises no veto, so an agent that has not spoken
+                // yet contributes nothing.
+                gpu_holders: Vec::new(),
                 last_report: crate::clock::now(),
             },
         );
@@ -412,6 +428,15 @@ impl Manager {
     /// MPRIS for itself: a session bus authenticates by uid and closes a root connection,
     /// measured, so this fact can only come from inside the session.
     ///
+    /// `gpu_holders` is `(pid, process name, bytes)` for every process of the agent's own
+    /// uid that holds DRM memory, already de-duplicated per DRM client id. It is reported
+    /// for a permission reason rather than a bus one: `/proc/<pid>/fdinfo` is mode 0555 and
+    /// still gated by `ptrace_may_access`, so reading another user's needs `CAP_SYS_PTRACE`
+    /// -- measured -- which is the ability to read any process's memory and not something a
+    /// daemon that can power the machine off is given in order to attribute video RAM. The
+    /// list is **raw**: the threshold, the desktop exclusion and the attribution to a game
+    /// all happen in this daemon, in [`crate::facts::gpu`].
+    ///
     /// This doubles as the liveness heartbeat of [CLK-5]. It must be called on every
     /// idle/active edge **and** at the interval `RegisterAgent` returned, because the
     /// signal has to disappear on failure: while somebody is holding a controller an idle
@@ -420,14 +445,19 @@ impl Manager {
         &self,
         idle_usec: u64,
         media_playing: &str,
+        gpu_holders: Vec<(u32, String, u64)>,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let sender = sender_of(&header)?;
+        let holders = bounded_holders(gpu_holders);
         let mut engine = self.engine.lock().await;
-        if !engine
-            .agents
-            .report(&sender, idle_usec, media_playing, crate::clock::now())
-        {
+        if !engine.agents.report(
+            &sender,
+            idle_usec,
+            media_playing,
+            holders,
+            crate::clock::now(),
+        ) {
             return Err(zbus::fdo::Error::AccessDenied(
                 "this connection has not registered as an agent".into(),
             ));
@@ -491,6 +521,26 @@ impl Manager {
     ) -> zbus::Result<()>;
 }
 
+/// Turns one agent's raw report into holders, bounded per [ACT-10].
+///
+/// Truncation rather than refusal: a report that is too long is still mostly evidence, and
+/// dropping the whole thing would blind the GPU facts because of one bad entry. The bounds
+/// are far enough above a real machine that a truncated report means a broken or hostile
+/// agent, not a busy one.
+fn bounded_holders(raw: Vec<(u32, String, u64)>) -> Vec<Holder> {
+    raw.into_iter()
+        .take(MAX_HOLDERS)
+        .map(|(pid, name, bytes)| Holder {
+            pid,
+            // By characters, not bytes: this string came from another process's command
+            // line, and slicing UTF-8 on a byte index that is not a boundary panics --
+            // inside the daemon that owns the machine's power decision.
+            name: name.chars().take(MAX_HOLDER_NAME).collect(),
+            bytes,
+        })
+        .collect()
+}
+
 fn sender_of(header: &zbus::message::Header<'_>) -> zbus::fdo::Result<String> {
     header
         .sender()
@@ -511,4 +561,36 @@ fn parse_optional_action(name: &str) -> zbus::fdo::Result<Option<Action>> {
         return Ok(None);
     }
     parse_action(name).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [ACT-10]: what an unprivileged agent sends is bounded before it is stored. A
+    /// hostile agent cannot make the machine sleep with this, but it could otherwise make
+    /// the daemon hold an unbounded list and write unbounded log lines.
+    #[test]
+    fn an_agents_report_is_bounded_in_both_directions() {
+        let raw: Vec<(u32, String, u64)> = (0..MAX_HOLDERS as u32 + 10)
+            .map(|pid| (pid, "x".repeat(MAX_HOLDER_NAME + 10), 1))
+            .collect();
+        let bounded = bounded_holders(raw);
+        assert_eq!(bounded.len(), MAX_HOLDERS);
+        assert_eq!(bounded[0].name.chars().count(), MAX_HOLDER_NAME);
+    }
+
+    /// The name is truncated by characters. Slicing a multi-byte string on a byte index
+    /// that is not a character boundary panics, and this string arrives from another
+    /// process's command line -- a filename with an accent in it is enough.
+    #[test]
+    fn truncating_a_name_cannot_panic_on_a_multibyte_character() {
+        // Written as an escape rather than as the literal character so this file stays
+        // pure ASCII: the repository's publication audit treats an accented Latin letter
+        // in a source file as a possible fragment of the non-English notes this project
+        // was extracted from, and fails on it.
+        let name = "\u{e9}".repeat(MAX_HOLDER_NAME + 10);
+        let bounded = bounded_holders(vec![(1, name, 1)]);
+        assert_eq!(bounded[0].name.chars().count(), MAX_HOLDER_NAME);
+    }
 }

@@ -96,6 +96,17 @@ pub struct Context<'a> {
     /// session bus**: measured, the bus authenticates by uid and closes the connection.
     /// The agent reads MPRIS where the session bus is simply its own.
     pub media_playing: Reading,
+    /// The DRM `fdinfo` GPU memory holders, reported by the session agents and folded
+    /// across the live ones.
+    ///
+    /// Passed in for the same class of reason as `media_playing`, this time a permission
+    /// wall rather than a bus one: `/proc/<pid>/fdinfo` is gated by `ptrace_may_access`,
+    /// so reading another user's needs `CAP_SYS_PTRACE` -- measured -- and this daemon holds
+    /// only `CAP_DAC_READ_SEARCH`. Raw holders; [`gpu::read`] is what attributes them.
+    ///
+    /// Empty when no agent is reporting, which is the absence of a reading rather than a
+    /// broken one and must never become doubt.
+    pub gpu_holders: Vec<gpu::Holder>,
     /// Whether this boot has resumed at least once ([CLK-8]).
     pub after_resume: bool,
     /// Session ids whose own presence a caller asked to be discounted ([FACT-9]).
@@ -163,7 +174,7 @@ impl Detectors {
         let gpu_enabled = ctx.policy.fact_enabled(FactId::GpuBusyGame)
             || ctx.policy.fact_enabled(FactId::GpuBusyOther);
         let gpu = if gpu_enabled {
-            gpu::read(game.state == FactState::True, &service).await
+            gpu::read(&ctx.gpu_holders, game.state == FactState::True, &service).await
         } else {
             gpu::Split {
                 game: Reading::absent("disabled by configuration"),

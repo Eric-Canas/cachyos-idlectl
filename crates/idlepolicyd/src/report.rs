@@ -459,10 +459,15 @@ pub async fn doctor(engine: &Engine) -> (String, bool) {
     for (name, agent) in engine.agents.iter() {
         let _ = writeln!(
             out,
-            "  agent {name} in session {} (uid {}), can_blank={}, last report {}",
+            // The GPU holder count is here because it is the only visible sign that the
+            // DRM fdinfo source is alive: the daemon cannot read fdinfo itself, so a
+            // `gpu_busy_*` reading `unavailable` on an AMD or Intel machine is explained
+            // by this number being zero and by nothing else in this report.
+            "  agent {name} in session {} (uid {}), can_blank={}, {} GPU holder(s), last report {}",
             agent.session_id,
             agent.uid,
             agent.can_blank,
+            agent.gpu_holders.len(),
             ago(now.since(agent.last_report))
         );
     }
