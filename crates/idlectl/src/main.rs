@@ -271,6 +271,66 @@ fn not_running(err: zbus::Error) -> anyhow::Error {
     )
 }
 
+/// Now, on the clock the daemon's deadlines are expressed in.
+///
+/// Every instant on this interface is an absolute point on `CLOCK_BOOTTIME`, because that
+/// is the one clock that keeps counting across a suspend and therefore the only one a
+/// policy about sleeping can be written against. Printing one of those raw is honest and
+/// useless: "+6907s" is a fact about a machine's boot, not an answer to "how long have I
+/// got". Turning it into a duration needs the current value of the same clock, and since
+/// this client talks to a daemon over the *system* bus it is by construction on the same
+/// machine, so it can simply read it.
+///
+/// `/proc/uptime` **is** `CLOCK_BOOTTIME`, which is the whole reason it is used here
+/// rather than a new dependency for one `clock_gettime` call. Measured on a machine that
+/// had suspended: `/proc/uptime` 7384.87, `CLOCK_BOOTTIME` 7384.87, `CLOCK_MONOTONIC`
+/// 7270.40 — the 114 s difference being exactly the time it had spent asleep.
+fn boot_now_usec() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/uptime").ok()?;
+    let secs: f64 = text.split_whitespace().next()?.parse().ok()?;
+    if secs.is_finite() && secs >= 0.0 {
+        Some((secs * 1_000_000.0) as u64)
+    } else {
+        None
+    }
+}
+
+/// A boot-clock instant as "in 12m30s", or `None` when the clock cannot be read.
+///
+/// Deliberately a gloss on the absolute value rather than a replacement for it: the
+/// absolute instant is what the D-Bus property carries, what the journal logs and what a
+/// second tool would compare against, so dropping it would make two views of the same
+/// machine impossible to line up. This mirrors how `idlectl explain` already prints
+/// `origin=+4775s (30s ago)`.
+fn in_from_now(deadline_usec: u64) -> Option<String> {
+    let now = boot_now_usec()?;
+    Some(if deadline_usec <= now {
+        "now".to_owned()
+    } else {
+        format!(
+            "in {}",
+            human(std::time::Duration::from_micros(deadline_usec - now))
+        )
+    })
+}
+
+/// A duration a person can read at a glance.
+///
+/// A second copy of `idlepolicyd`'s `report::human`, and not shared with it on purpose.
+/// That one lives in a binary crate, so nothing can import it; the alternative is moving
+/// presentation into `idlectl-policy`, which is the pure engine and carries no formatting
+/// at all. Eight lines duplicated is a smaller price than blurring that boundary.
+fn human(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 async fn status(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::ExitCode> {
     if json {
         println!("{}", manager.report().await?);
@@ -299,7 +359,12 @@ async fn status(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::
         } else if deadline == u64::MAX {
             "never".to_owned()
         } else {
-            format!("at +{}s since boot", deadline / 1_000_000)
+            match in_from_now(deadline) {
+                Some(relative) => {
+                    format!("{relative}  (at +{}s since boot)", deadline / 1_000_000)
+                }
+                None => format!("at +{}s since boot", deadline / 1_000_000),
+            }
         };
         println!("  {name:<20} {when}");
     }
@@ -438,10 +503,11 @@ async fn lease(
                 println!("no leases held");
             } else {
                 for (who, why, _acquired, expires, uid) in leases {
-                    println!(
-                        "{who:<24} uid {uid:<6} expires at +{}s  {why}",
-                        expires / 1_000_000
+                    let when = in_from_now(expires).map_or_else(
+                        || format!("expires at +{}s since boot", expires / 1_000_000),
+                        |relative| format!("expires {relative}"),
                     );
+                    println!("{who:<24} uid {uid:<6} {when:<22} {why}");
                 }
             }
             Ok(std::process::ExitCode::SUCCESS)
@@ -584,4 +650,61 @@ fn default_layers() -> Vec<PathBuf> {
     }
 
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations_round_down_rather_than_inventing_precision() {
+        assert_eq!(human(std::time::Duration::from_secs(59)), "59s");
+        assert_eq!(human(std::time::Duration::from_secs(90)), "1m30s");
+        assert_eq!(
+            human(std::time::Duration::from_secs(3 * 3600 + 61)),
+            "3h01m"
+        );
+    }
+
+    // A deadline that has already passed is "now", never a wrapped duration. The
+    // subtraction is on unsigned microseconds, so getting this wrong would not print a
+    // negative number -- it would print several hundred thousand years, on the one screen
+    // a person reads when they want to know whether their machine is about to sleep.
+    // /proc is Linux, and so is this daemon; the tests below are gated rather than made
+    // portable because there is no second implementation to be portable to. The formatter
+    // above has no such dependency and runs everywhere.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_deadline_in_the_past_reads_as_now_and_never_wraps() {
+        let now = boot_now_usec().expect("/proc/uptime is readable on any Linux");
+        assert_eq!(in_from_now(0).as_deref(), Some("now"));
+        assert_eq!(
+            in_from_now(now.saturating_sub(60_000_000)).as_deref(),
+            Some("now")
+        );
+    }
+
+    // The point of the change: a lease taken out for a minute must read as a minute,
+    // whatever the machine's uptime happens to be.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_future_deadline_reads_as_the_time_remaining_not_as_the_boot_offset() {
+        let now = boot_now_usec().expect("/proc/uptime is readable on any Linux");
+        let text = in_from_now(now + 60_000_000).expect("the clock was just read");
+        assert!(
+            text.starts_with("in 59s") || text.starts_with("in 1m00s"),
+            "expected roughly a minute of remaining time, got {text:?}"
+        );
+    }
+
+    // /proc/uptime is CLOCK_BOOTTIME, so it cannot go backwards and cannot be zero on a
+    // running system. This is the assumption the two functions above are built on.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_boot_clock_is_readable_and_moves_forward() {
+        let first = boot_now_usec().expect("/proc/uptime is readable on any Linux");
+        assert!(first > 0);
+        let second = boot_now_usec().expect("/proc/uptime is readable on any Linux");
+        assert!(second >= first);
+    }
 }

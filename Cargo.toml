@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # MSRV. Driven by zbus 5.x, which declares rust-version = "1.87" and edition 2024.
 #
@@ -28,8 +28,8 @@ categories = ["command-line-utilities", "os::linux-apis"]
 
 [workspace.dependencies]
 # --- workspace-internal ---------------------------------------------------------
-idlectl-policy = { path = "crates/idlectl-policy", version = "0.1.0" }
-idlectl-config = { path = "crates/idlectl-config", version = "0.1.0" }
+idlectl-policy = { path = "crates/idlectl-policy", version = "0.1.1" }
+idlectl-config = { path = "crates/idlectl-config", version = "0.1.1" }
 
 # --- pure data ------------------------------------------------------------------
 # serde and toml perform no I/O whatsoever: they turn &str into structs. They are the
@@ -72,12 +72,19 @@ clap = { version = "4.6.4", features = ["derive"] }
 # These never reach idlepolicyd. The privileged half of this project links no display
 # protocol at all: it decides, and the unprivileged agent inside the session performs.
 #
-# These pull in libwayland-client.so through wayland-backend's system backend, which the
-# protocol crates re-enable through feature unification even when wayland-client is taken
-# without default features. That is accepted rather than fought: every comparable agent
-# (swayidle, hypridle) links it too, it is a core package on any distribution shipping a
-# Wayland session, and it lands only on the agent binary. idlepolicyd -- the half that can
-# turn a machine off -- links none of it and runs on a machine with no display stack at all.
+# These link NO C library. wayland-backend ships two implementations and only the
+# `client_system` one binds libwayland-client; nothing here, and nothing in the protocol
+# crates' `client` features, turns it on, so the pure-Rust backend is what gets compiled.
+# Measured on the packaged binary rather than argued from the feature graph: `ldd
+# idlectl-agent` lists libc, libgcc_s and the vdso and nothing else, and the string
+# "libwayland" does not appear in the binary at all, which also rules out a dlopen.
+#
+# Worth stating because it is the opposite of what comparable agents do -- swayidle and
+# hypridle both link libwayland-client -- and because the packaging depends on it: an
+# `ldd`-clean agent is why the distribution package needs no `wayland` dependency.
+#
+# idlepolicyd -- the half that can turn a machine off -- carries none of these at all and
+# runs on a machine with no display stack.
 wayland-client = "0.31.14"
 wayland-protocols = { version = "0.32.12", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }

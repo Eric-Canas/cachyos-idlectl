@@ -15,6 +15,31 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.1.1] - 2026-07-27
+
+Found by packaging `0.1.0` and installing it, rather than by reading the code.
+
+### Changed
+
+- **`idlectl status` and `idlectl lease list` print how long is left, not a boot offset.**
+  Every instant on the D-Bus interface is an absolute point on `CLOCK_BOOTTIME`, because
+  that is the only clock that keeps counting across a suspend. Printing one raw meant a
+  lease taken out for sixty seconds displayed as `expires at +6907s`, which is a true
+  statement about the machine's boot and no answer at all to "how long have I got". Both
+  now read `expires in 1m00s` and `in 12m30s  (at +7200s since boot)` — the absolute
+  value kept as a parenthetical, because it is what the property carries, what the journal
+  logs and what a second tool would line up against. The JSON output is unchanged.
+
+### Fixed
+
+- **The comment claiming the session agent links `libwayland-client` was wrong.** It
+  reasoned from feature unification and concluded the C backend gets pulled in
+  regardless. Measured on the packaged binary: `ldd idlectl-agent` lists libc, libgcc_s
+  and the vdso and nothing else, and the string `libwayland` does not appear in it at
+  all, so it is neither linked nor dlopened — wayland-client is built with its pure-Rust
+  backend. This is load-bearing rather than trivia: it is why the distribution package
+  needs no `wayland` dependency.
+
 ## [0.1.0] - 2026-07-27
 
 The first release.
@@ -117,5 +142,6 @@ reasoned about — the notes below record what that verification changed.
 - `TESTING.md` with the manual suspend/resume protocol, including the normative resume case, and an
   explicit account of what CI cannot cover.
 
-[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Eric-Canas/cachyos-idlectl/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Eric-Canas/cachyos-idlectl/releases/tag/v0.1.0
