@@ -726,9 +726,14 @@ the service has been idle forever.)*
 suspending is not using the service, so the count must survive a sleep; a cold boot has no
 history, so it must be cleared.)*
 
-**[FACT-44]** This fact MUST ship **disabled**. Until `[facts.local_service_busy] counters_url` is
-set, it reports `UNAVAILABLE`, its detector MUST NOT run, and it contributes no doubt veto. Setting
-`counters_url` is what enables it.
+**[FACT-44]** This fact MUST ship **disabled**. With no `[facts.local_service_busy] counters_url`
+configured it reports `UNAVAILABLE`, its detector MUST NOT run, and it contributes no doubt veto.
+
+Turning it on takes **both** `enabled = true` and a `counters_url`, in a later layer. Configuration
+merges per key ([CFG-3]), so a layer that sets only the URL leaves the shipped `enabled = false`
+standing and the fact stays off. The shipped file MUST say so where an administrator will read it,
+because the failure is silent in the safe direction: the veto simply never runs, and the machine
+sleeps through work it should have waited for.
 
 *(Rationale: [FACT-34] read in the other direction. The counter endpoint of the service this fact
 was written for is off by default, so a detector that shipped enabled would be unreadable — and
@@ -2113,8 +2118,10 @@ as *switched off in configuration* and points at the block of comments that says
 Beyond that, no `counters_url` is
 configured, so the fact reads `UNAVAILABLE` and its detector never runs ([FACT-44]). The
 `[while.local_service_busy]` block above is therefore inert on a fresh install and is listed as
-inert by `doctor` ([FACT-3], [OBS-3].2). It becomes live the moment an administrator points it at a
-counters endpoint, which is the only moment it can be trusted.
+inert by `doctor` ([FACT-3], [OBS-3].2). It becomes live when an administrator sets **both**
+`enabled = true` and a `counters_url` in a later layer -- merging is per key, so the URL alone
+leaves the shipped `enabled = false` in force ([FACT-44]). That is the only moment it can be
+trusted, and the shipped file spells out both keys next to the switch.
 
 **On what does not ship.** No `[when]` block ships by default: ceilings are an administrator's tool
 and every one of them is a standing hazard ([CEIL-6]–[CEIL-8]). The shipped posture is that the
