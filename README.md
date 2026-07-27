@@ -38,11 +38,17 @@ proposal wins, `never` beats everything, an action key a block does not set cont
 that action, and the default over zero true blocks is to do nothing. Order never matters, and there
 is no priority list to get wrong.
 
-> **Status: `0.1.0`, and working.** The daemon, the CLI and the session agent are implemented, and
+> **Status: `0.4.1`, and working.** The daemon, the CLI and the session agent are implemented, and
 > everything below has been exercised on a real CachyOS machine: the eleven facts, the decision
-> loop, leases, polkit authorization, the KDE and wlroots blanking backends, and resume detection
-> across a genuine `deep` suspend. Not yet on the AUR — until it is, build the package from the
-> PKGBUILD (see [Install](#install)) or run `packaging/install.sh`.
+> loop, leases, held requests, polkit authorization, the KDE and wlroots blanking backends, and
+> resume detection across a genuine `deep` suspend. Not yet on the AUR — until it is, build the
+> package from the PKGBUILD (see [Install](#install)) or run `packaging/install.sh`.
+>
+> It has spent days running in `--dry-run` beside the system it was extracted from, on the same
+> machine, with the two sets of decisions compared in the journal. That is where most of the bugs
+> fixed since `0.1.0` came from, and none of them were visible to the test suite: they only appear
+> once the shipped units are actually started. The [CHANGELOG](CHANGELOG.md) records what each one
+> was and how it was measured.
 
 ---
 
@@ -51,6 +57,7 @@ is no priority list to get wrong.
 - [What it is not](#what-it-is-not)
 - [Conflicts — read this before installing](#conflicts--read-this-before-installing)
 - [Configuration](#configuration)
+- [Requesting rest](#requesting-rest) — including relays and machines with nobody in front of them
 - [Facts](#facts)
 - [Explaining a decision](#explaining-a-decision)
 - [Why not logind's `IdleActionSec`, or an inhibitor](#why-not-loginds-idleactionsec-or-an-inhibitor)
