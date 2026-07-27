@@ -1,0 +1,24 @@
+[package]
+name = "idlectl"
+description = "Command-line client for idlepolicyd: inspect, explain and override idle policy."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "idlectl"
+path = "src/main.rs"
+
+# No tracing here. A command-line tool writes to the user's terminal, not to the journal;
+# a log-level filter between the user and the answer to "why is this machine awake?" is
+# an obstacle, not a feature.
+[dependencies]
+idlectl-policy = { workspace = true, features = ["serde"] }
+idlectl-config = { workspace = true }
+zbus = { workspace = true }
+async-io = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

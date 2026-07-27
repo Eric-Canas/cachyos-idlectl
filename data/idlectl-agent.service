@@ -1,0 +1,121 @@
+####################################################################################
+# idlectl-agent -- the unprivileged per-session agent.
+#
+# THIS UNIT IS NOT ENABLED BY THE PACKAGE. There is no user preset and no install
+# hook. Enable it in the session that should report facts:
+#
+#     systemctl --user enable --now idlectl-agent.service
+#
+# It reports; it never decides. Three facts only exist inside a desktop session --
+# human idle (the compositor owns it), media playback (MPRIS lives on the session bus)
+# and whether GPU load belongs to a game (matching against the user's own Steam
+# library) -- and a root daemon has no business connecting to a user's session bus to
+# get them.
+#
+# IT ACTS IN EXACTLY ONE WAY, AND THAT IS THE SCREEN.
+#
+# Blanking a display is not a power transition and logind has no mechanism for it: on
+# a Wayland session only the compositor, or whatever holds DRM master, can turn an
+# output off. So this agent exports Blank/Unblank on the system bus, callable by uid 0
+# alone, and idlepolicyd invokes them when screen_off comes due. The daemon decides;
+# the agent performs, inside its own session. It can suspend, hibernate or power off
+# nothing, and no configuration can give it those.
+#
+# Without this agent the daemon still works. The session-scoped facts read
+# `unavailable`, which behaves as false, so nothing wedges: the machine follows its
+# schedule using the facts it can see for itself. screen_off then reports
+# `unavailable` as an ACTION -- the daemon does not propose it, blocks that set a
+# screen_off key are inert, and `idlectl doctor` says so and names them, rather than
+# the panel quietly never being blanked.
+####################################################################################
+
+[Unit]
+Description=idlectl session agent
+Documentation=man:idlectl(1) man:idlepolicyd(8)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+# No Condition*= here either, and for the same reason as in idlepolicyd.service: a
+# skipped unit is a silent unit. In particular there is no check for "is this a
+# Wayland session" or "is Steam installed" -- the agent reports what it can read and
+# says so in the journal when it cannot read something.
+
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/idlectl-agent
+Restart=on-failure
+RestartSec=5s
+
+# A missing system daemon is not a failure for the agent: idlepolicyd is not enabled
+# by the package and may legitimately never have been turned on. The agent logs a
+# warning and keeps running rather than being restarted forever for no reason.
+Environment=IDLECTL_LOG=info
+
+# ---------------------------------------------------------------------------------
+# Sandboxing
+#
+# CAVEAT for all of the below: sandboxing in a *user* unit is applied by the user
+# manager and needs unprivileged user namespaces. On a kernel where
+# kernel.unprivileged_userns_clone is disabled these directives cause the unit to
+# fail to start rather than to start unsandboxed -- which is the correct direction,
+# but it does mean "the agent will not start" has a boring answer. Check with:
+#
+#     systemctl --user show idlectl-agent.service -p Result -p StatusErrno
+#     sysctl kernel.unprivileged_userns_clone
+# ---------------------------------------------------------------------------------
+NoNewPrivileges=yes
+
+# Belt and braces: a process started by a user manager has no capabilities to begin
+# with. The empty set makes that explicit rather than assumed, and survives somebody
+# later wondering whether the agent could be given one.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+PrivateTmp=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+UMask=0077
+
+# RELAXED from ProtectHome=yes.
+#
+# Deciding whether a process is a game means matching it against the Steam library
+# metadata in the user's own home directory. This is the agent's whole reason for
+# existing as a separate, unprivileged process: the data belongs to the user, so the
+# thing reading it runs as the user. Read-only, because it has no reason to write.
+ProtectHome=read-only
+
+# RELAXED from ProtectProc=invisible.
+#
+# The agent inspects processes to attribute GPU load. Under `invisible` it would see
+# nothing and report false -- silently, and with a plausible-looking answer, which is
+# worse than an error.
+ProtectProc=default
+ProcSubset=pid
+
+# The Wayland socket, the session bus and the system bus are all AF_UNIX. The agent
+# opens no network socket. An X11 session reached over TCP rather than over its unix
+# socket is not supported, deliberately: a display exported over the network is not a
+# reliable statement about whether somebody is physically present.
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @obsolete @reboot @swap @cpu-emulation
+
+[Install]
+# Present so `systemctl --user enable` works. Nothing in the packaging invokes it.
+WantedBy=graphical-session.target

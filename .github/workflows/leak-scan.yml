@@ -1,0 +1,157 @@
+# ---------------------------------------------------------------------------
+# idlectl -- leak scan
+#
+# Separate from ci.yml on purpose.  A build breaks and gets fixed; a leaked
+# host name is public the moment it is pushed and stays in the history
+# afterwards, so this runs on its own schedule, over the whole history, and is
+# never disabled to unblock a merge.
+#
+# Two things it does that a diff-time hook cannot:
+#   * fetch-depth: 0 plus --log-opts=--all scans every commit on every ref, not
+#     just the pull request's diff.  A value removed in a later commit is still
+#     published by the earlier one.
+#   * it re-runs on a schedule, so a rule added today is applied to history
+#     written before it existed.
+#
+# What it cannot do is tier 2: matching the REAL identifiers of the machine
+# this design came from.  Those literals are deliberately not in this
+# repository.  Tier 2 runs locally, in scripts/preflight-publish.sh, before the
+# push -- see the optional secret below for the CI half.
+# ---------------------------------------------------------------------------
+name: leak-scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly: catches history written before a rule was added.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: leak-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    name: shapes, working tree and full history
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux
+    env:
+      # Lifted into env because the `secrets` context is not addressable from a
+      # step-level `if:`; `env` is.  Empty when the secret is not configured.
+      RULES: ${{ secrets.IDLECTL_COMMIT_IDENTITY }}
+    steps:
+      - name: Install toolchain
+        run: pacman -Syu --noconfirm --needed git gitleaks
+
+      - uses: actions/checkout@v4
+        with:
+          # Required: the history scan is the point of this workflow.
+          fetch-depth: 0
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Config is present and parses
+        run: |
+          set -euo pipefail
+          test -f .gitleaks.toml
+          empty=$(mktemp -d)
+          gitleaks detect --no-git --source "$empty" --config .gitleaks.toml --no-banner
+
+      # --redact: findings are echoed into a public log. Reporting the value
+      # would publish exactly what the scan exists to keep private.
+      - name: Working tree, including untracked files
+        run: |
+          set -euo pipefail
+          gitleaks detect --no-git --source . --config .gitleaks.toml --redact --exit-code 1
+
+      - name: Full history, every ref
+        run: |
+          set -euo pipefail
+          gitleaks detect --source . --config .gitleaks.toml --redact --exit-code 1 --log-opts=--all
+
+      # Deliberately without --require-ignored: check 3 of that script asks
+      # whether assistant-tooling paths are ignored, and those patterns live in
+      # .git/info/exclude, which is never cloned.  A fresh checkout can never
+      # satisfy it, so requiring it here would pin this workflow red forever.
+      # The script prints a ::notice:: saying it was skipped; the check itself
+      # runs before every push, in scripts/preflight-publish.sh.
+      - name: Tracked path shapes and ignore-rule hygiene
+        run: ./scripts/check-tracked-paths.sh --tracked
+
+      - name: Commit identities and message trailers
+        # Needs the allowlist, which lives outside the repository; supply it as
+        # a repository secret to enable this in CI as well as locally.
+        #
+        # Structurally local-only for outside contributions: GitHub makes no
+        # secrets available to a pull request from a fork, whatever is
+        # configured, so this step is skipped on every fork PR by design and
+        # not by accident.  The pre-push audit is the gate that always runs.
+        if: env.RULES != ''
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$RULES" > "$RUNNER_TEMP/commit-identity.txt"
+          IDLECTL_COMMIT_IDENTITY="$RUNNER_TEMP/commit-identity.txt" \
+            ./scripts/check-commit-identity.sh --all
+          shred -u "$RUNNER_TEMP/commit-identity.txt" 2>/dev/null || rm -f "$RUNNER_TEMP/commit-identity.txt"
+
+      # The counterpart the `literals` job already has.  A conditional step
+      # with no else-branch vanishes from the log entirely, and "the identity
+      # scan found nothing" and "the identity scan did not run" are not the
+      # same statement about this repository.
+      - name: Say so when it did not run
+        if: env.RULES == ''
+        run: echo "::notice::IDLECTL_COMMIT_IDENTITY is not set (the documented default, and unavoidable on pull requests from forks); commit-identity checking runs locally only, via scripts/preflight-publish.sh"
+
+  literals:
+    name: tier-2 literals (only if the pattern secret is configured)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux
+    env:
+      LITERALS: ${{ secrets.IDLECTL_FORBIDDEN_LITERALS }}
+    steps:
+      - name: Install toolchain
+        run: pacman -Syu --noconfirm --needed git
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # OPTIONAL, and a deliberate trade-off.  Storing the real host names and
+      # addresses as an Actions secret puts them on a third party's servers --
+      # encrypted, never exposed to fork pull requests, but stored.  Leaving
+      # the secret unset is a legitimate choice: the local pre-push audit
+      # already covers this, and it covers it with the full --objects scan.
+      #
+      # The scanner prints rule NUMBERS, never the pattern and never the
+      # matched text, so a finding here cannot leak the literal into the log.
+      #
+      # Note also that GitHub makes no secrets available to a pull request from
+      # a fork, however this repository is configured.  This step is therefore
+      # structurally skipped on every fork PR, which is another reason the
+      # local pre-push audit -- not this job -- is the gate that matters.
+      - name: Reachable history
+        if: env.LITERALS != ''
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$LITERALS" > "$RUNNER_TEMP/forbidden-literals.txt"
+          IDLECTL_FORBIDDEN_LITERALS="$RUNNER_TEMP/forbidden-literals.txt" \
+            ./scripts/check-forbidden-literals.sh --history
+          shred -u "$RUNNER_TEMP/forbidden-literals.txt" 2>/dev/null || rm -f "$RUNNER_TEMP/forbidden-literals.txt"
+
+      - name: Say so when it did not run
+        if: env.LITERALS == ''
+        run: echo "::notice::IDLECTL_FORBIDDEN_LITERALS is not set; tier-2 literal scanning runs locally only, via scripts/preflight-publish.sh"

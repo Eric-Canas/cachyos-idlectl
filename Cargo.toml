@@ -1,0 +1,66 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/idlectl-policy",
+    "crates/idlectl-config",
+    "crates/idlepolicyd",
+    "crates/idlectl-agent",
+    "crates/idlectl",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# MSRV. Driven by zbus 5.x, which declares rust-version = "1.87" and edition 2024.
+#
+# There is deliberately NO rust-toolchain.toml in this repository. Pinning an exact
+# toolchain file makes no sense for a rolling distribution target: the packager builds
+# with whatever `rust` is in the repo that day, and a pin would either be ignored (if
+# rustup is absent) or would try to download a second toolchain inside a build chroot.
+# `rust-version` is the correct mechanism: it states a floor and fails the build with a
+# clear message instead of a wall of type errors.
+rust-version = "1.87"
+license = "MIT"
+repository = "https://github.com/Eric-Canas/cachyos-idlectl"
+homepage = "https://github.com/Eric-Canas/cachyos-idlectl"
+keywords = ["idle", "power", "suspend", "systemd", "dbus"]
+categories = ["command-line-utilities", "os::linux-apis"]
+
+[workspace.dependencies]
+# --- workspace-internal ---------------------------------------------------------
+idlectl-policy = { path = "crates/idlectl-policy", version = "0.1.0" }
+idlectl-config = { path = "crates/idlectl-config", version = "0.1.0" }
+
+# --- pure data ------------------------------------------------------------------
+# serde and toml perform no I/O whatsoever: they turn &str into structs. They are the
+# only dependencies the two pure crates are allowed to carry.
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.3"
+
+# --- runtime (binaries only) -----------------------------------------------------
+# zbus's default features are ["async-io", "blocking-api"].
+#
+#   * async-io  -- REQUIRED. zbus 5.18 has a compile_error! in lib.rs that fires unless
+#                  exactly one of `async-io` or `tokio` is enabled; `blocking-api` alone
+#                  does not provide a transport, it only expands to zbus_macros/blocking-api.
+#   * tokio     -- MUST NEVER be enabled, anywhere in the tree. This project runs one
+#                  reactor. async-io already drives the D-Bus socket, inotify, the udev
+#                  netlink socket and every timer; a second scheduler would mean two
+#                  places that can block the decision loop. `cargo deny` enforces this
+#                  (see deny.toml [bans]); the pin below is the first line of defence.
+#   * blocking-api -- switched off. Every call site here is async.
+zbus = { version = "5.18.0", default-features = false, features = ["async-io"] }
+async-io = "2.6.0"
+async-executor = "1.14.0"
+futures-lite = "2.6.1"
+clap = { version = "4.6.4", features = ["derive"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+anyhow = "1.0.104"
+serde_json = "1.0.151"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# `strip` is deliberately NOT set: distribution packaging decides whether to strip and
+# whether to split out a debug package. Overriding it here would fight makepkg.

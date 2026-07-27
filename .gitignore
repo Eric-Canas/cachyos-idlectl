@@ -1,0 +1,96 @@
+# ---------------------------------------------------------------------------
+# idlectl -- ignored paths
+#
+# Scope: build artefacts, editor/OS noise, packaging scratch, generated docs.
+#
+# DELIBERATELY ABSENT: assistant / agent tooling paths.  Naming them in a
+# published file is itself evidence that the toolchain was used, so they live in
+# .git/info/exclude, which is local-only and never pushed.
+#
+# Both halves are enforced mechanically by scripts/check-tracked-paths.sh:
+#   * it FAILS if such a path is named in this file, and
+#   * it FAILS if such a path is not ignored by *something*
+#     (`git check-ignore` does not care which file did it).
+# ---------------------------------------------------------------------------
+
+# --- Rust / Cargo ----------------------------------------------------------
+/target/
+**/target/
+*.rs.bk
+*.orig
+*.rej
+# Cargo.lock IS committed on purpose: this crate ships a binary and the AUR
+# build() runs with --frozen.  Do not add it here.
+#
+# It is a required file, not generated output.  Every cargo step in
+# .github/workflows/ci.yml passes --locked or --frozen so that CI resolves the
+# same dependency graph the packager will, which makes a missing Cargo.lock a
+# hard CI failure rather than a silent network fetch.  Generate it with
+# `cargo generate-lockfile` at the workspace root and commit it.
+
+# --- Coverage / profiling --------------------------------------------------
+*.profraw
+*.profdata
+/coverage/
+/lcov.info
+tarpaulin-report.*
+cobertura.xml
+perf.data
+perf.data.old
+flamegraph.svg
+
+# --- Generated documentation ----------------------------------------------
+# Man pages are authored as scdoc in man/*.scd; the roff output is generated at
+# build time and must never be committed.
+man/*.1
+man/*.5
+man/*.7
+man/*.8
+man/*.[1-8].gz
+*.roff
+
+# --- Arch packaging scratch ------------------------------------------------
+# The PKGBUILD lives in a separate AUR repository, so makepkg is never meant to
+# run inside this checkout.  These entries only catch the accident.
+/pkg/
+/PKGBUILD
+/.SRCINFO
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.pkg.tar.gz
+*.src.tar.gz
+/makepkg.log
+/*.log
+#
+# NOTE on makepkg's src/ directory: it is NOT listed here, on purpose.  `/src/`
+# is also where a Rust crate keeps its own source, and ignoring it would
+# silently untrack the entire program -- a far worse failure than an accidental
+# scratch directory.  Git cannot un-ignore the contents of an ignored
+# directory, so there is no pattern that separates the two cases.  The scratch
+# case is caught instead by scripts/check-tracked-paths.sh, which fails if a
+# tracked path looks like makepkg output (PKGBUILD, .SRCINFO, pkg/, *.pkg.tar.*).
+
+# --- Editor / OS noise -----------------------------------------------------
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# --- Local environment -----------------------------------------------------
+# Never publish a developer's environment: it is the classic carrier for host
+# names, addresses and credentials.
+.env
+.env.*
+.envrc
+.direnv/
+/result
+/.cache/
+*.tmp

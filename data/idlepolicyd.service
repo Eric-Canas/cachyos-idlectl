@@ -1,0 +1,195 @@
+####################################################################################
+# idlepolicyd -- the idle/power policy daemon.
+#
+# THIS UNIT IS NOT ENABLED BY THE PACKAGE.
+#
+# There is no systemd preset shipped, no post-install hook and no `systemctl enable`
+# anywhere in the packaging. Installing a program that can suspend a machine must not
+# be the same act as giving it permission to. Turn it on when you mean to:
+#
+#     systemctl enable --now idlepolicyd.service
+#
+# It also does not conflict with, mask or disable your desktop's own power settings.
+# Two owners of the power state is the architectural bug this project exists to
+# remove, but removing it is your decision to make: turn the desktop's automatic
+# suspend off yourself, and leave it owning the things it should still own (what the
+# power button does, what closing a lid does, the screen-lock timer).
+####################################################################################
+
+[Unit]
+Description=Idle and power policy daemon
+Documentation=man:idlepolicyd(8) man:idlectl(1) man:idlectl.toml(5)
+After=dbus.service
+Requires=dbus.service
+
+# NO Condition*= OR Assert*= DIRECTIVES HERE, ON PURPOSE.
+#
+# A unit carrying a Condition* that does not hold is skipped SILENTLY: systemd marks
+# it inactive with result "success" and logs nothing worth finding. A feature that
+# was shipped, never ran, and produced no evidence of not running cost a real outage
+# once already. Something as simple as ConditionVirtualization=!container would mean
+# that a user in a container gets no policy, no error and no clue.
+#
+# If this daemon cannot usefully run, it must start, say so at ERROR level with the
+# actual reason, and exit non-zero. Loud beats convenient.
+
+# A crash loop should be visible rather than infinite.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+# Type=dbus, so systemd considers the service started when the name appears on the
+# bus. No sd_notify implementation, no readiness protocol to get subtly wrong, and
+# clients that call before the daemon is ready are handled by bus activation
+# semantics rather than by luck.
+Type=dbus
+BusName=io.github.ericcanas.Idlectl1
+ExecStart=/usr/bin/idlepolicyd
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# The journal already stamps every line with a time and a priority.
+StandardOutput=journal
+StandardError=journal
+
+# Set IDLECTL_LOG=debug to trace the decision loop. Deliberately not RUST_LOG: a
+# variable named after the implementation language invites being set globally by
+# something else and drowning the journal.
+Environment=IDLECTL_LOG=info
+
+# ---------------------------------------------------------------------------------
+# Runtime state
+# ---------------------------------------------------------------------------------
+RuntimeDirectory=idlectl
+# 0755, not the 0700 that UMask= would otherwise imply: idlectl(1) and the session
+# agent are unprivileged and must be able to read the daemon's published state.
+RuntimeDirectoryMode=0755
+# Preserved across a restart on purpose. Leases live here, and a lease is a promise
+# that a machine will not sleep during a long job. A daemon restart -- a reload gone
+# wrong, an upgrade, a crash -- must not silently drop that promise and let the
+# machine suspend in the middle of the work the lease was protecting.
+RuntimeDirectoryPreserve=yes
+
+# ---------------------------------------------------------------------------------
+# Privileges
+#
+# The daemon performs no power transition itself. Suspend, hibernate and poweroff are
+# D-Bus calls to logind, which is already privileged and already arbitrates sessions.
+# That is what makes the empty capability set below possible, and it is also why the
+# daemon never shells out to `systemctl poweroff`: without a controlling terminal that
+# command returns 0 and ignores inhibitors and open sessions entirely.
+#
+# It does not blank a screen itself either. logind has no mechanism for that, and on a
+# Wayland session only the compositor can do it, so screen_off is a call into
+# idlectl-agent's Blank/Unblank inside the session that owns the display. Where no
+# agent is present, screen_off is unavailable as an action and is reported as such.
+# ---------------------------------------------------------------------------------
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+UMask=0077
+
+# ---------------------------------------------------------------------------------
+# Filesystem
+# ---------------------------------------------------------------------------------
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+PrivateTmp=yes
+
+# RELAXED from ProtectClock=... interaction, stated explicitly because it is easy to
+# miss: ProtectClock=yes ALSO removes CAP_SYS_TIME *and CAP_WAKE_ALARM* from the
+# bounding set. That is fine today because the daemon never needs to be woken from a
+# suspend by its own timer -- escalation from suspend to hibernate is delegated to
+# logind's suspend-then-hibernate rather than reimplemented here. If a future version
+# arms a CLOCK_BOOTTIME_ALARM timerfd, this line must be relaxed to `no` and
+# CAP_WAKE_ALARM added to CapabilityBoundingSet= above, together.
+ProtectClock=yes
+
+# RELAXED from ProtectHome=yes.
+#
+# Attributing GPU load or a running process to a game means resolving /proc/<pid>/exe,
+# and a Steam library lives under a user's home directory. With ProtectHome=yes those
+# paths are hidden, the detector cannot answer, and the fact reads `indeterminate` --
+# which vetoes. The machine would then never suspend, and the cause would be a
+# sandboxing directive rather than anything a user could see. Read-only is sufficient:
+# the daemon has no reason to write anywhere under /home and this forbids it.
+ProtectHome=read-only
+
+# RELAXED from ProtectProc=invisible.
+#
+# `invisible` hides other users' processes even from root, and inspecting other users'
+# processes is exactly what the game and service detectors do. This directive would
+# not fail loudly; it would just make every process-based fact read false.
+ProtectProc=default
+
+# NOT relaxed: only per-process entries under /proc are needed, never /proc/meminfo
+# and friends. If a detector ever needs one of those it will read `indeterminate` and
+# veto -- the machine stays awake, which is the cheap direction to fail in -- and this
+# line is the first thing to check.
+ProcSubset=pid
+
+# ---------------------------------------------------------------------------------
+# Devices
+# ---------------------------------------------------------------------------------
+# RELAXED from PrivateDevices=yes.
+#
+# Attributing GPU busy-ness on an NVIDIA card goes through NVML, which needs the real
+# /dev/nvidia* character devices. PrivateDevices=yes replaces /dev with API
+# pseudo-devices only, and no amount of DeviceAllow= can put a node back into a /dev
+# that does not contain it. So the private /dev is given up and a closed device policy
+# with an explicit read-only allowlist is used instead, which is the same protection
+# expressed at the cgroup rather than the mount.
+#
+# On AMD and Intel the equivalent data comes from sysfs and needs none of this; the
+# allowlist simply matches nothing and costs nothing.
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=/dev/nvidiactl r
+DeviceAllow=/dev/nvidia-uvm r
+DeviceAllow=char-nvidia-frontend r
+
+# ---------------------------------------------------------------------------------
+# Network
+#
+# The daemon opens no network socket, ever. AF_UNIX is D-Bus; AF_NETLINK is the udev
+# monitor that reports input devices appearing and disappearing. AF_INET and AF_INET6
+# are absent on purpose: a policy daemon that could reach the network would be a
+# policy daemon that could be asked to do things from the network.
+# ---------------------------------------------------------------------------------
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+PrivateNetwork=no
+
+# ---------------------------------------------------------------------------------
+# System calls
+#
+# The default action for a filtered call is to kill the process with SIGSYS, and it is
+# left at the default deliberately: SystemCallErrorNumber=EPERM would turn a sandbox
+# violation into a detector quietly returning an error, i.e. a fact reading
+# `indeterminate` forever with nothing in the journal explaining why. A dead unit with
+# a SIGSYS in the log is the diagnosable failure.
+#
+# ~@reboot is worth reading twice: this daemon decides that a machine should power off
+# and is then forbidden by the kernel from doing it itself. logind performs the act.
+# ---------------------------------------------------------------------------------
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @obsolete @reboot @swap @cpu-emulation
+
+# Rust static binary; nothing here JITs. If NVML ever fails to load with a permission
+# error that makes no sense, this is the first line to test with.
+MemoryDenyWriteExecute=yes
+
+[Install]
+# Present so that `systemctl enable` works when a user asks for it. Nothing in the
+# packaging invokes it. See the header.
+WantedBy=multi-user.target

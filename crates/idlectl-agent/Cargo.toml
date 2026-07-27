@@ -1,0 +1,24 @@
+[package]
+name = "idlectl-agent"
+description = "Unprivileged per-session agent that reports session facts to idlepolicyd."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "idlectl-agent"
+path = "src/main.rs"
+
+# No idlectl-config dependency on purpose: the agent has no policy and no configuration of
+# its own. It reports what it can see and never decides anything. Everything that can turn
+# a machine off lives in idlepolicyd.
+[dependencies]
+zbus = { workspace = true }
+async-io = { workspace = true }
+futures-lite = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

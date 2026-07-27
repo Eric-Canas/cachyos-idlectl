@@ -1,0 +1,142 @@
+# ---------------------------------------------------------------------------
+# idlectl -- pre-commit hooks
+#
+#   pre-commit install --install-hooks
+#
+# Layering, cheapest first:
+#   pre-commit   file hygiene, path shapes, tier-1 shapes, tier-2 literals,
+#                the identity the commit is about to be made under
+#   commit-msg   the message itself
+#   pre-push     the full publication audit
+#
+# The tier-2 hooks read real identifiers from a file outside the repository and
+# will FAIL if it is absent.  That is intended: a scanner that silently skips is
+# how the thing it was watching for gets published.
+# ---------------------------------------------------------------------------
+minimum_pre_commit_version: "3.2.0"
+
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+  - pre-push
+
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: forbid-new-submodules
+      - id: check-toml
+      - id: check-yaml
+      - id: detect-private-key
+
+  # Tier 1: identifier SHAPES.  Same ruleset CI runs, so a violation is caught
+  # on the machine that created it rather than in a public pull request.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+        args: [--config, .gitleaks.toml, --redact]
+
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.10.0
+    hooks:
+      - id: shellcheck
+        args: [--severity=style, --external-sources]
+
+  - repo: local
+    hooks:
+      # This repository is English-only; the notes it was extracted from are
+      # not.  An accented Latin letter is evidence of a copied paragraph.
+      # Deliberately narrower than "no non-ASCII": em dashes and arrows are
+      # typography, and a hook that fails on punctuation gets uninstalled.
+      # LICENSE is exempt -- a copyright line must spell a legal name.
+      - id: no-non-english-orthography
+        name: forbid accented Latin letters and inverted punctuation
+        language: pygrep
+        # Escaped, so that this file does not match its own rule.
+        entry: '[\u00A1\u00BF\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u024F]'
+        types: [text]
+        exclude: '^(LICEN[CS]E|COPYING)(\..*)?$|^LICENSES/'
+
+      # --require-ignored is right HERE and wrong in CI: it asks whether the
+      # assistant-tooling patterns are ignored, and their only sanctioned home
+      # is .git/info/exclude, which git never clones.  This hook runs in the
+      # working copy that owns that file, so it is the earliest place the
+      # question can be asked and answered.  ci.yml and leak-scan.yml call the
+      # same script without the flag; the script announces the skip there.
+      - id: check-tracked-paths
+        name: tracked path shapes and ignore-rule hygiene
+        language: script
+        entry: scripts/check-tracked-paths.sh
+        args: [--staged, --require-ignored]
+        pass_filenames: false
+        always_run: true
+
+      # Tier 2: real literals, read from outside the repository.
+      - id: forbidden-literals-staged
+        name: forbidden literals (staged content)
+        language: script
+        entry: scripts/check-forbidden-literals.sh
+        args: [--staged]
+        pass_filenames: false
+        always_run: true
+
+      - id: commit-identity
+        name: commit identity of the pending commit
+        language: script
+        entry: scripts/check-commit-identity.sh
+        args: [--pending]
+        pass_filenames: false
+        always_run: true
+
+      - id: forbidden-literals-msg
+        name: forbidden literals (commit message)
+        language: script
+        entry: scripts/check-forbidden-literals.sh
+        # pre-commit appends the message file, giving "--msg <file>".
+        args: [--msg]
+        stages: [commit-msg]
+
+      - id: commit-message-trailers
+        name: commit message trailers and encoding
+        language: script
+        entry: scripts/check-commit-identity.sh
+        args: [--msg]
+        stages: [commit-msg]
+
+      - id: rustfmt
+        name: cargo fmt --check
+        language: system
+        entry: cargo fmt --all -- --check
+        files: \.rs$
+        pass_filenames: false
+
+      - id: clippy
+        name: cargo clippy -D warnings
+        language: system
+        entry: cargo clippy --all-targets --all-features -- -D warnings
+        files: \.rs$
+        pass_filenames: false
+
+      # The whole audit, including the history and orphaned-object scans, at
+      # the last point where nothing has left the machine yet.
+      - id: preflight-publish
+        name: publication audit
+        language: script
+        entry: scripts/preflight-publish.sh
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

@@ -1,0 +1,315 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE node PUBLIC
+ "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+
+<!--
+  Interface definition for idlepolicyd.
+
+    bus name     io.github.ericcanas.Idlectl1
+    object path  /io/github/ericcanas/Idlectl1
+    interface    io.github.ericcanas.Idlectl1.Manager
+
+  Installed at /usr/share/dbus-1/interfaces/ so that other projects can generate
+  bindings without depending on this one.
+
+  Time is in MICROSECONDS on CLOCK_BOOTTIME, matching logind's own convention for
+  IdleSinceHint and friends, and UINT64_MAX means "never". Two deliberate choices:
+
+    * CLOCK_BOOTTIME, not CLOCK_MONOTONIC, because MONOTONIC stops during suspend and
+      every deadline computed before a sleep would come back wrong by exactly the
+      length of the sleep. Not CLOCK_REALTIME either: NTP can step it, and a backwards
+      step makes a deadline unreachable.
+    * UINT64_MAX rather than 0 for "never", because 0 is a real instant (boot) and
+      because a client that forgets to special-case it gets a deadline absurdly far in
+      the future (a machine that stays awake, which is the cheap error) instead of
+      one already in the past.
+-->
+<node>
+  <interface name="io.github.ericcanas.Idlectl1.Manager">
+
+    <!-- ============================ properties ============================ -->
+
+    <!-- Daemon version string, the same one the binary reports on the command line. -->
+    <property name="Version" type="s" access="read"/>
+
+    <!--
+      Configuration layers actually applied, in order. The answer to "which file set
+      this?", which is otherwise guesswork once drop-ins are involved.
+    -->
+    <property name="ConfigLayers" type="as" access="read"/>
+
+    <!--
+      Every fact and its current state, as (name, state) pairs. State is one of
+      "true", "false", "indeterminate", "unavailable".
+
+      The last two are not interchangeable and clients must not collapse them:
+      "unavailable" means this machine has no such capability (or that the fact was
+      switched off by name in the configuration), and behaves as false;
+      "indeterminate" means the detector exists and could not answer, which vetoes
+      suspend, hibernate and poweroff. The veto does not depend on any block naming
+      that fact: it is about the machine no longer being able to see something it
+      normally sees. Any doubt is a veto, except for screen_off, where it is not,
+      because one unreadable detector must not be able to keep an OLED panel lit all
+      night.
+
+      A capability that is absent always reads "unavailable" and never
+      "indeterminate". Absence is knowledge; only a detector that exists and failed
+      produces doubt.
+    -->
+    <property name="Facts" type="a(ss)" access="read"/>
+
+    <!--
+      Per-action resolution, as (action, deadline_usec, due) triples. `action` is one
+      of "screen_off", "suspend", "hibernate", "poweroff".
+
+      Each deadline is resolved independently: the LATEST deadline among the true
+      [while] blocks that set a key for that action (plus any implicit floor, such as
+      an indeterminate fact or a rejected configuration file), then pulled earlier by
+      the EARLIEST deadline among the true [when] blocks that set one. More than one
+      may be due at the same time; the daemon then performs screen_off if it is due
+      plus the SHALLOWEST due sleep action, never a deeper one. A client must not
+      read several due sleep actions as "all of these will happen".
+    -->
+    <property name="Deadlines" type="a(stb)" access="read"/>
+
+    <!--
+      The earliest deadline not yet reached: when the daemon will next act if nothing
+      changes. UINT64_MAX when nothing is scheduled.
+    -->
+    <property name="NextDeadlineUSec" type="t" access="read"/>
+
+    <!-- Whether the daemon is evaluating but deliberately not acting. -->
+    <property name="DryRun" type="b" access="read"/>
+
+    <!-- ============================= methods ============================== -->
+
+    <!--
+      Human-readable explanation of one action, or of all four when `action` is empty.
+      Names the composed deadline, the clock each block was measured on, and every
+      block holding the action back.
+
+      It also names the reasons that are not blocks: every enabled fact currently
+      reading indeterminate, and every configuration file that had to be rejected.
+      A machine wedged awake by one of those has nothing in its configuration to point
+      at, so leaving them out would make the one case that most needs explaining the
+      one case with no explanation.
+
+      Not polkit-checked. A diagnostic that needs authentication is a diagnostic
+      nobody runs.
+    -->
+    <method name="Explain">
+      <arg name="action" type="s" direction="in"/>
+      <arg name="text" type="s" direction="out"/>
+    </method>
+
+    <!--
+      Which detectors work here and which capabilities are absent. The supported way
+      to tell "unavailable" from "indeterminate" without reading the journal.
+    -->
+    <method name="Doctor">
+      <arg name="text" type="s" direction="out"/>
+    </method>
+
+    <!--
+      Treat exactly two blocks as satisfied (the one whose condition is `always` and
+      the one whose condition is `after_resume`), as if their timeouts had elapsed,
+      including where their configured value is `never`. The base schedule and the
+      post-resume settle window, and nothing else. The set is fixed by condition name
+      and no configuration key can enlarge it.
+
+      IT DOES NOT COLLAPSE CONDITION BLOCKS. A running game, an active download, a
+      held lease and an open remote session are all still evaluated normally, each on
+      its own clock, and any of them can still refuse. Neither does it satisfy the
+      vetoes that are not blocks: an indeterminate fact and a rejected configuration
+      file both still hold. This is what a remote relay calls when it has finished
+      with a machine; it must never be able to suspend one that is in the middle of
+      something.
+
+      Returns whether the action became due. `false` is a normal answer, not an error:
+      it means something else is still holding the machine awake, and Explain() will
+      say what.
+
+      polkit: io.github.ericcanas.Idlectl1.rest
+    -->
+    <method name="Rest">
+      <arg name="action" type="s" direction="in"/>
+      <arg name="accepted" type="b" direction="out"/>
+      <annotation name="io.github.ericcanas.Idlectl1.PolkitAction"
+                  value="io.github.ericcanas.Idlectl1.rest"/>
+    </method>
+
+    <!--
+      Install a ceiling due immediately for this one action and this one request, and
+      perform it.
+
+      Ceilings are absolute, so this defeats every floor there is, mechanically and
+      without special cases: every `never`, the human_active floor, the veto raised by
+      a fact reading indeterminate, and the veto raised by a configuration file that
+      had to be rejected. The last two are what it is usually reached for: a machine
+      wedged awake by something broken rather than by something happening, which
+      Rest() by construction cannot help.
+
+      It overrides POLICY, never MECHANISM. One power transition at a time still
+      holds, a refusal from logind is still logged rather than retried blindly, and
+      the facts are still re-read and the policy recomputed immediately before acting,
+      carrying this same ephemeral ceiling, so a forced action cannot cancel itself.
+
+      Deliberately a separate method rather than a flag on Rest(): a caller has to
+      have chosen this one by name, the polkit action is separate, and `why` is
+      mandatory and recorded in the journal at warning level together with every floor
+      that was defeated and each floor's reason. This is the only way to suspend a
+      machine somebody is actively typing on.
+
+      polkit: io.github.ericcanas.Idlectl1.rest-forced
+    -->
+    <method name="RestForced">
+      <arg name="action" type="s" direction="in"/>
+      <arg name="why" type="s" direction="in"/>
+      <annotation name="io.github.ericcanas.Idlectl1.PolkitAction"
+                  value="io.github.ericcanas.Idlectl1.rest-forced"/>
+    </method>
+
+    <!--
+      Take a lease: the machine will not sleep while it is held.
+
+      Returns a file descriptor, the way logind's Inhibit() does, and for the same
+      reason: the lease is released when the descriptor is closed, so a job that
+      crashes or is killed cannot pin a machine awake forever. `ttl_usec` is a second
+      bound on top of that, for the case where the holder survives but forgets.
+
+      polkit: io.github.ericcanas.Idlectl1.lease
+    -->
+    <method name="AcquireLease">
+      <arg name="who" type="s" direction="in"/>
+      <arg name="why" type="s" direction="in"/>
+      <arg name="ttl_usec" type="t" direction="in"/>
+      <arg name="handle" type="h" direction="out"/>
+      <annotation name="io.github.ericcanas.Idlectl1.PolkitAction"
+                  value="io.github.ericcanas.Idlectl1.lease"/>
+    </method>
+
+    <!--
+      Leases currently held, as (who, why, acquired_usec, expires_usec, uid).
+      Not polkit-checked: seeing what is holding a machine awake is diagnosis.
+    -->
+    <method name="ListLeases">
+      <arg name="leases" type="a(sttu)" direction="out"/>
+    </method>
+
+    <!--
+      Re-read the configuration. Returns the layers that were applied.
+
+      A file that cannot be parsed, or that carries a value the format does not
+      accept, is dropped AS A WHOLE: per file, never per key, because a half-applied
+      file is a policy nobody wrote. The layers that still parse take effect.
+      While any such fault stands, suspend, hibernate and poweroff are held at
+      `never`, screen_off is deliberately not, and Doctor() exits non-zero naming the
+      file, the key and the text it could not read.
+
+      The daemon therefore never ends up with no policy at all, including on a first
+      start after a bad edit, when there is no previous policy to fall back to. A
+      machine with no owner of its power state is the condition this project exists to
+      remove.
+
+      polkit: io.github.ericcanas.Idlectl1.reload
+    -->
+    <method name="Reload">
+      <arg name="layers" type="as" direction="out"/>
+      <annotation name="io.github.ericcanas.Idlectl1.PolkitAction"
+                  value="io.github.ericcanas.Idlectl1.reload"/>
+    </method>
+
+    <!-- ============================= signals ============================== -->
+
+    <!--
+      An action was performed. `reason` names what made it due: the block whose
+      deadline expired, or, when a [when] ceiling fired, that ceiling, the file it
+      came from and every floor it defeated. A ceiling that acted against a floor and
+      said nothing would be worse than no ceiling at all.
+    -->
+    <signal name="ActionTaken">
+      <arg name="action" type="s"/>
+      <arg name="reason" type="s"/>
+    </signal>
+
+    <!--
+      An action came due and was NOT performed, with the reasons that held it back.
+
+      `blocks` also carries the reasons that are not blocks: each enabled fact
+      currently reading indeterminate, and each configuration file that had to be
+      rejected. Those hold the three sleep actions on their own, and a machine wedged
+      awake by one of them has nothing in its configuration to point at.
+
+      Emitted because "nothing happened" is otherwise invisible, and "why did my
+      machine not sleep last night?" needs an answer that is not a guess.
+    -->
+    <signal name="ActionHeld">
+      <arg name="action" type="s"/>
+      <arg name="blocks" type="as"/>
+    </signal>
+
+    <!-- One or more facts changed state, as (name, state) pairs. -->
+    <signal name="FactsChanged">
+      <arg name="facts" type="a(ss)"/>
+    </signal>
+
+    <!-- Configuration was reloaded successfully; carries the layers applied. -->
+    <signal name="PolicyReloaded">
+      <arg name="layers" type="as"/>
+    </signal>
+
+  </interface>
+
+  <!--
+    THE SESSION AGENT'S INTERFACE.
+
+    Exported by idlectl-agent on the system bus, on the object path
+    /io/github/ericcanas/Idlectl1/Agent. The agent owns no well-known name: it
+    registers with the daemon and the daemon calls back on its unique connection name,
+    so nothing here requires a per-user name-ownership rule and an ordinary user
+    cannot squat the interface by claiming a name. Only uid 0 may call these; see
+    io.github.ericcanas.Idlectl1.conf.
+
+    This is the ONE thing the agent does that is not reporting a fact, and the reason
+    it has to exist: blanking a display is not a power transition and logind has no
+    mechanism for it. On a Wayland session only the compositor, or whatever holds DRM
+    master, can turn an output off, and a root daemon has no business being either. So
+    the daemon decides and the agent, inside its own session, performs.
+
+    The narrowness is the point. The agent can command nothing but the screen, only in
+    its own session, and only when the caller is the daemon. It cannot suspend,
+    hibernate or power off anything, and no configuration can give it those.
+
+    Where no agent is running, or the session type offers no blanking mechanism,
+    screen_off is UNAVAILABLE as an action: the daemon does not propose it, every
+    block setting a screen_off key is inert, and Doctor() says so and names them. It
+    is never silently treated as done.
+  -->
+  <interface name="io.github.ericcanas.Idlectl1.Agent">
+
+    <!--
+      Blank the outputs of this session. Idempotent: blanking an already-blank session
+      is not an error and is not re-issued as an action by the daemon, which is what
+      keeps a dark panel from starving the sleep actions.
+    -->
+    <method name="Blank"/>
+
+    <!--
+      Unblank. Called when an origin is re-armed by human input, and on the agent's
+      own shutdown, so that stopping the agent can never leave a session dark with
+      nothing left running that knows how to bring it back.
+    -->
+    <method name="Unblank"/>
+
+    <!-- Whether the outputs are currently blanked by this agent. -->
+    <property name="Blanked" type="b" access="read"/>
+
+    <!--
+      Whether this session offers a blanking mechanism at all. False means screen_off
+      is unavailable here, and the daemon reports it as such rather than pretending.
+    -->
+    <property name="CanBlank" type="b" access="read"/>
+
+  </interface>
+</node>

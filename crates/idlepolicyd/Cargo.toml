@@ -1,0 +1,26 @@
+[package]
+name = "idlepolicyd"
+description = "System daemon that decides when a machine may blank, suspend, hibernate or power off."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The binary is `idlepolicyd`, not `idled`: /usr/bin/idled is taken by cyrus-imapd. The
+# CLI and the daemon therefore have different names, the same way powerprofilesctl drives
+# power-profiles-daemon.
+[[bin]]
+name = "idlepolicyd"
+path = "src/main.rs"
+
+[dependencies]
+idlectl-policy = { workspace = true, features = ["serde"] }
+idlectl-config = { workspace = true }
+zbus = { workspace = true }
+async-io = { workspace = true }
+futures-lite = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

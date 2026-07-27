@@ -1,0 +1,31 @@
+[package]
+name = "idlectl-policy"
+description = "Pure idle/power policy engine: composes per-action deadlines from three-state facts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# PURITY CONTRACT
+#
+# This crate performs no I/O, reads no clock, opens no socket and spawns no thread. It is
+# a function from (policy, facts, clock snapshot) to a decision. Everything that can fail,
+# block or lie lives in idlepolicyd.
+#
+# Practical consequence: the whole engine is testable without a machine. The normative
+# resume-window test at the bottom of src/lib.rs is a plain `cargo test`, not an
+# integration test that needs a suspend cycle.
+#
+# The only permitted dependency is `serde`, and only behind an off-by-default feature,
+# and only for `Serialize` -- deriving `Deserialize` here would invite someone to build a
+# Policy straight out of a config file and skip validation. Policies are constructed by
+# idlectl-config, which validates.
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enables `Serialize` on the public types so idlepolicyd can put a Decision on D-Bus and
+# `idlectl explain --json` can print one.
+serde = ["dep:serde"]

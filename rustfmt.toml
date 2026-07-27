@@ -1,0 +1,12 @@
+# Stable-only rustfmt settings.
+#
+# Nightly-only options (imports_granularity, group_imports, wrap_comments,
+# comment_width, format_code_in_doc_comments, ...) are deliberately absent: this project
+# must format identically for a packager building with the distribution's stable `rust`
+# and for a contributor running `cargo fmt` locally. An option that silently does nothing
+# on stable is worse than no option at all.
+
+edition = "2024"
+max_width = 100
+use_small_heuristics = "Default"
+newline_style = "Unix"

@@ -1,0 +1,71 @@
+# cargo-deny configuration.
+#
+# Precedent for keeping this file at the repository root: asusctl ships deny.toml the
+# same way. Run with `cargo deny check` (or `make audit`).
+#
+# Written against cargo-deny 0.20.x. The pre-0.16 keys (`[licenses] unlicensed`,
+# `[advisories] vulnerability/unmaintained`, `[[bans.deny]] name = / version =`) were
+# removed upstream and are NOT used here.
+
+[graph]
+# Only Linux matters. idlectl reads logind, /proc, /sys, udev and inotify; there is no
+# meaningful build on any other platform and checking them would only produce noise.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+all-features = false
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# No blanket ignores. A root daemon that decides when a machine sleeps has no business
+# carrying a knowingly vulnerable dependency; each exception must be added here with a
+# comment naming the advisory and the reason.
+ignore = []
+
+[licenses]
+# Permissive only. The package is MIT and is intended for distribution repositories, so
+# nothing copyleft may be linked in statically without a deliberate decision.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+# A wildcard version requirement in a daemon that can power a machine off is not
+# acceptable: it makes the build unreproducible between the maintainer's machine and the
+# packaging chroot.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[[bans.deny]]
+crate = "tokio"
+reason = """
+Single-reactor rule. zbus is pinned to its `async-io` feature and async-io also drives
+inotify, udev and the timers. Pulling tokio in -- directly or transitively -- would put a
+second scheduler in the process, so a blocked task in one runtime could stall the loop
+that decides whether the machine may suspend. If a dependency ever needs tokio, replace
+the dependency, do not add an exception here.
+"""
+
+[[bans.deny]]
+crate = "async-std"
+reason = "Same single-reactor rule as tokio. async-io is the one reactor in this process."
+
+[[bans.deny]]
+crate = "openssl-sys"
+reason = "idlectl opens no network sockets. A TLS stack appearing here means a dependency grew a feature this project does not want."
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# No git dependencies. A distribution package must build from a released tarball plus a
+# checksum; a git dependency would make `makepkg` reach the network at build time.
+allow-git = []

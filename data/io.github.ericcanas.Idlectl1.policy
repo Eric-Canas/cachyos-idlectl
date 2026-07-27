@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+
+<!--
+  polkit actions for idlepolicyd.
+
+  Installed at /usr/share/polkit-1/actions/. Local overrides belong in
+  /etc/polkit-1/rules.d/, which the package does not touch.
+
+  The defaults below follow one principle, applied consistently: an action that can
+  only ever make the machine STAY AWAKE is cheap to get wrong and is allowed freely;
+  an action that can make it SLEEP is expensive to get wrong and is gated. A machine
+  that stays awake wrongly costs electricity. One that sleeps wrongly loses work.
+
+  Note especially the lease action: allow_inactive is `yes`, which is unusual. It is
+  correct here precisely because a lease cannot cause a sleep, and because the caller
+  who needs one most, somebody over ssh starting a six-hour job, is by definition
+  in a session logind considers inactive. Requiring authentication there would mean
+  the one caller with no way to answer a prompt is the one being prompted.
+-->
+<policyconfig>
+
+  <vendor>idlectl</vendor>
+  <vendor_url>https://github.com/Eric-Canas/cachyos-idlectl</vendor_url>
+
+  <action id="io.github.ericcanas.Idlectl1.rest">
+    <description>Let this machine rest now</description>
+    <message>Authentication is required to let this machine rest now.</message>
+    <!--
+      Satisfies exactly two blocks, fixed by condition name: `always` and
+      `after_resume`, i.e. the base schedule and the post-resume settle window. Every
+      other block is still evaluated, so this cannot interrupt a game, a download, a
+      held lease or an open remote session, and neither can it clear the vetoes that
+      are not blocks (a detector that cannot answer, a configuration file that had to
+      be rejected). No configuration key can widen what this action reaches.
+
+      Allowed for anyone at the machine: it is no more than saying "I am done", and
+      the person in front of the screen can already press the power button.
+      Authentication is required remotely, because a remote caller cannot see whether
+      somebody else is sitting at it.
+    -->
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.github.ericcanas.Idlectl1.rest-forced">
+    <description>Force this machine to rest, overriding every safeguard</description>
+    <message>Authentication is required to force this machine to rest, overriding a running game, an active download, a held lease and the presence of anyone using it.</message>
+    <!--
+      The only way to suspend a machine somebody is actively typing on.
+
+      It installs a ceiling due immediately, so it defeats every floor there is: every
+      `never`, human presence, the veto raised by a detector that cannot answer and
+      the veto raised by a rejected configuration file. That last pair is what it is
+      usually reached for: a machine wedged awake by something broken rather than by
+      something happening. That is also why it cannot be folded into
+      `io.github.ericcanas.Idlectl1.rest`: this is a strictly larger power, and a
+      credential that may ask a machine to rest must not thereby be able to force one
+      that somebody is using.
+
+      auth_admin_keep even for a caller sitting at the machine, and no `yes` anywhere:
+      this overrides the human-presence floor, so the fact that a human is present is
+      not evidence that this particular action is wanted. `_keep` so that a legitimate
+      operator running several of these in a row is not worn down into automating the
+      prompt away.
+    -->
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.github.ericcanas.Idlectl1.lease">
+    <description>Hold this machine awake while a job runs</description>
+    <message>Authentication is required to hold this machine awake.</message>
+    <!--
+      A lease can only prevent sleep, never cause it, and it is bounded twice over: it
+      dies with the file descriptor that holds it, and it expires at its TTL. The
+      worst outcome of granting it too freely is a machine that stayed awake and can
+      be inspected with `idlectl lease list`.
+
+      allow_inactive=yes is the deliberate part. The canonical caller is a remote
+      session starting long work, and logind considers such a session inactive; there
+      is nobody there to answer a prompt. Denying it would push people towards
+      disabling the whole daemon, which is a strictly worse outcome.
+    -->
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.github.ericcanas.Idlectl1.reload">
+    <description>Reload the idle policy configuration</description>
+    <message>Authentication is required to reload the idle policy configuration.</message>
+    <!--
+      Reloading applies whatever is currently in /etc/idlectl, which is
+      administrator-owned; being able to trigger it is close enough to being able to
+      change policy that it is gated the same way. A file that cannot be parsed is
+      dropped as a whole and named in the journal, the layers that still parse take
+      effect, and the three sleep actions are held until the fault is fixed, so a
+      reload can leave a machine awake, but never without a policy.
+    -->
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>

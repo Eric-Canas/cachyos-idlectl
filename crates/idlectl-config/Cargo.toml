@@ -1,0 +1,27 @@
+[package]
+name = "idlectl-config"
+description = "Pure parser, drop-in merger and validator for idlectl.toml."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# PURITY CONTRACT
+#
+# This crate never touches the filesystem. It takes `&str` in and gives a validated
+# `Policy` out. The caller reads the files, in the order it decides, and labels each one
+# so that error messages can name it.
+#
+# Two reasons this is worth the small inconvenience. First, the whole layering behaviour
+# -- vendor file, admin override, conf.d drop-ins -- is unit-testable from string literals,
+# with no fixture directory and no root. Second, a config parser that opens files is a
+# parser that can block: `idlectl-policy` and this crate are the two pieces the daemon
+# calls while deciding whether a machine may sleep, and neither is allowed to wait on a
+# stalled mount.
+#
+# `serde` and `toml` are pure transformations over text. Nothing else may be added here.
+[dependencies]
+idlectl-policy = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }

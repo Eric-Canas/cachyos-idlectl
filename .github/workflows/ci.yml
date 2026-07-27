@@ -1,0 +1,256 @@
+# ---------------------------------------------------------------------------
+# idlectl -- continuous integration
+#
+# Everything runs inside an Arch container, because Arch is the distribution
+# this daemon targets and the AUR package is the primary way it is installed.
+# CI that green-lights a build the packager cannot reproduce is theatre.
+#
+# In particular the test job reproduces the constraints of an AUR check():
+# offline, unprivileged, and with no session bus.  A test that quietly needs a
+# D-Bus session on the developer's desktop fails in every clean chroot on
+# earth -- and it fails there in front of a user, not here.
+#
+# Conditional jobs announce themselves in the `layout` job before they are
+# skipped.  A check that disappears without saying so is how a feature becomes
+# dead code that logs nothing.
+# ---------------------------------------------------------------------------
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Mirrors what a PKGBUILD exports, so toolchain resolution matches the
+  # packager's.
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  layout:
+    name: what is in the tree
+    runs-on: ubuntu-latest
+    outputs:
+      has_cargo: ${{ steps.probe.outputs.has_cargo }}
+      has_deny: ${{ steps.probe.outputs.has_deny }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: probe
+        run: |
+          set -euo pipefail
+          if [ -f Cargo.toml ]; then
+            echo "has_cargo=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cargo=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::no Cargo.toml in the tree; the rust job is being skipped"
+          fi
+          if [ -f deny.toml ]; then
+            echo "has_deny=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_deny=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no deny.toml in the tree; the cargo-deny job is being skipped"
+          fi
+
+  rust:
+    name: build, lint and test (arch)
+    needs: layout
+    if: needs.layout.outputs.has_cargo == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux
+    steps:
+      - name: Install toolchain
+        run: pacman -Syu --noconfirm --needed base-devel git rust clang pkgconf dbus systemd
+
+      - uses: actions/checkout@v4
+
+      # Every cargo step below runs --locked or --frozen, deliberately: that is
+      # how an AUR build() runs, and CI that resolves dependencies differently
+      # from the packager is testing a build nobody will ever perform.  The
+      # cost is that Cargo.lock is a PRECONDITION, not an artefact -- without
+      # it the first cargo invocation dies with "the lock file needs to be
+      # updated but --locked was passed", which reads like a dependency problem
+      # and is not.  Say what it actually is, once, before anything else runs.
+      - name: Cargo.lock is committed
+        run: |
+          set -euo pipefail
+          if [ ! -f Cargo.lock ]; then
+            echo "::error file=Cargo.toml::Cargo.lock is missing from the tree. It is a required, committed file, not generated output: .gitignore does not ignore it, and every cargo step in this job passes --locked/--frozen so that CI resolves exactly the dependency graph the AUR PKGBUILD will. Generate it on a machine with a Rust toolchain -- 'cargo generate-lockfile' at the workspace root -- run 'cargo fmt --all' at the same time (this job also checks formatting), and commit both."
+            exit 1
+          fi
+
+      - name: Trust the workspace and create an unprivileged build user
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Fetch dependencies (the only step allowed network access)
+        run: runuser -u builder -- cargo fetch --locked
+
+      - name: cargo fmt --check
+        run: runuser -u builder -- cargo fmt --all -- --check
+
+      - name: cargo clippy -D warnings
+        run: runuser -u builder -- cargo clippy --frozen --all-targets --all-features -- -D warnings
+
+      - name: cargo build (release, as build() does)
+        run: runuser -u builder -- cargo build --frozen --release --all-features
+
+      # An AUR check() runs in a clean chroot: no network, no root, no session
+      # bus, no display.  Unset every variable that would let a test reach a
+      # live desktop instead of its own fixtures.
+      - name: cargo test the way an AUR check() runs it
+        run: |
+          set -euo pipefail
+          runuser -u builder -- env \
+            -u DBUS_SESSION_BUS_ADDRESS \
+            -u DBUS_SYSTEM_BUS_ADDRESS \
+            -u XDG_RUNTIME_DIR \
+            -u DISPLAY \
+            -u WAYLAND_DISPLAY \
+            CARGO_NET_OFFLINE=true \
+            cargo test --frozen --all-features
+
+  units:
+    name: systemd units
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux
+    steps:
+      - name: Install toolchain
+        run: pacman -Syu --noconfirm --needed git systemd
+
+      - uses: actions/checkout@v4
+
+      - name: systemd-analyze verify
+        run: |
+          set -euo pipefail
+          units=$(find . -path ./.git -prune -o -type f \
+            \( -name '*.service' -o -name '*.socket' -o -name '*.timer' \
+               -o -name '*.slice' -o -name '*.target' -o -name '*.path' \) -print | sort)
+          if [ -z "$units" ]; then
+            echo "::warning::no systemd unit files found in the tree"
+            exit 0
+          fi
+          echo "$units"
+
+          # systemd-analyze rejects an ExecStart= whose binary does not exist,
+          # which in a checkout is every one of them.  Stub them so the check
+          # is about unit syntax and directives, not about the build layout.
+          for u in $units; do
+            grep -hoE '^Exec[A-Za-z]*=[-@!+:]*/[^ ]+' "$u" \
+              | sed 's/^[^=]*=[-@!+:]*//' | sort -u \
+              | while IFS= read -r bin; do
+                  [ -n "$bin" ] || continue
+                  if [ -e "$bin" ]; then continue; fi
+                  mkdir -p "$(dirname "$bin")"
+                  printf '#!/bin/sh\nexit 0\n' > "$bin"
+                  chmod 0755 "$bin"
+                done
+          done
+
+          # --man=no: Documentation= points at man pages generated at install
+          # time. --recursive-errors=one: report on these units, not on the
+          # dependency closure of the container's own systemd.
+          # shellcheck disable=SC2086
+          systemd-analyze verify --man=no --recursive-errors=one $units
+
+  shell:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux
+    steps:
+      - name: Install toolchain
+        run: pacman -Syu --noconfirm --needed git shellcheck
+
+      - uses: actions/checkout@v4
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Built once, then reused, for two reasons.
+      #
+      # `git ls-files -z '*.sh' | xargs -0 -r` is a no-op on empty input: -r
+      # suppresses the command entirely and xargs exits 0.  So if these scripts
+      # were ever renamed or moved, both steps below would pass without opening
+      # a file and without saying so -- the exact shape this workflow's own
+      # header calls out ("a check that disappears without saying so is how a
+      # feature becomes dead code that logs nothing").
+      #
+      # And the selector has to agree with scripts/preflight-publish.sh, which
+      # treats a sh/bash SHEBANG as a shell script too.  Two implementations
+      # that disagree about their input are two implementations each assuming
+      # the other looked.
+      - name: Collect shell scripts
+        run: |
+          set -euo pipefail
+          : >"$RUNNER_TEMP/shlist"
+          git ls-files -z | while IFS= read -r -d '' f; do
+            case "$f" in
+              *.sh | *.bash) printf '%s\n' "$f" >>"$RUNNER_TEMP/shlist" ;;
+              *)
+                if [ -f "$f" ] && head -c 64 -- "$f" | grep -Eq '^#!.*(ba)?sh'; then
+                  printf '%s\n' "$f" >>"$RUNNER_TEMP/shlist"
+                fi
+                ;;
+            esac
+          done
+          if [ ! -s "$RUNNER_TEMP/shlist" ]; then
+            echo "::error::no shell scripts found in the tree; the shell job would report success having checked nothing"
+            exit 1
+          fi
+          echo "checking:"
+          cat "$RUNNER_TEMP/shlist"
+
+      - name: bash -n
+        run: |
+          set -euo pipefail
+          tr '\n' '\0' <"$RUNNER_TEMP/shlist" | xargs -0 -n1 bash -n
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          tr '\n' '\0' <"$RUNNER_TEMP/shlist" |
+            xargs -0 shellcheck --severity=style --external-sources
+
+      # Needs no configuration and no secrets, so the shape of the published
+      # file set is enforced on every pull request, not only before a push.
+      #
+      # Without --require-ignored on purpose: check 3 of that script asks
+      # whether assistant-tooling paths are ignored, and the only sanctioned
+      # home for those patterns is .git/info/exclude, which git never clones.
+      # Requiring it here would make this job red in every checkout forever,
+      # for a condition no contributor could fix.  It runs before every push
+      # instead, in scripts/preflight-publish.sh.  The script announces the
+      # skip with ::notice:: so it is visible in this log rather than implied.
+      - name: tracked path shapes
+        run: ./scripts/check-tracked-paths.sh --tracked
+
+  deny:
+    name: cargo-deny
+    needs: layout
+    if: needs.layout.outputs.has_deny == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux
+    steps:
+      - name: Install toolchain
+        run: pacman -Syu --noconfirm --needed git cargo-deny
+      - uses: actions/checkout@v4
+      - name: cargo deny check
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cargo deny check

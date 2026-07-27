@@ -1,0 +1,54 @@
+# https://editorconfig.org
+#
+# Character policy, which an editorconfig cannot enforce but a contributor
+# should know: this repository is English-only.  An accented Latin letter or
+# inverted punctuation is treated as imported non-English prose and FAILS the
+# pre-commit hook and scripts/preflight-publish.sh (LICENSE excepted, since a
+# copyright line must spell a legal name).  Em dashes, arrows and curly quotes
+# are only an advisory -- prefer "--" and plain quotes, because ASCII survives
+# terminals, roff and diffs better.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+[*.rs]
+indent_size = 4
+max_line_length = 100
+
+[*.{toml,yml,yaml,json}]
+indent_size = 2
+
+[*.{sh,bash}]
+indent_size = 2
+
+# systemd units, D-Bus policy and introspection XML: key=value at column 0.
+[*.{service,socket,timer,target,slice,path,conf,rules,policy}]
+indent_size = 4
+[*.xml]
+indent_size = 2
+
+# scdoc is indentation-sensitive and uses hard tabs for continuation.
+[man/*.scd]
+indent_style = tab
+
+# Shell completions are checked in by hand rather than generated.
+[completions/**]
+indent_size = 2
+
+[Makefile]
+indent_style = tab
+
+# Trailing whitespace is a hard line break in Markdown.
+[*.md]
+trim_trailing_whitespace = false
+max_line_length = 80
+
+[LICENSE]
+insert_final_newline = false
