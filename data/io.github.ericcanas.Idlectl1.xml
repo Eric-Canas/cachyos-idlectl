@@ -175,6 +175,47 @@
     </method>
 
     <!--
+      Ask, and be remembered if the answer is "not yet" — REQ-6.
+
+      Returns TRUE only if the action happened immediately. FALSE means the request is
+      being HELD, not that it was refused: the machine carries it out the moment the
+      last veto clears, and forgets it at the TTL.
+
+      A held request is not a weaker one. It is re-evaluated on the ordinary schedule
+      with exactly the floors the original had, so a game that starts after it was made
+      refuses it just as surely as one already running would have. What is remembered
+      is the asking, never the answer.
+
+      It is dropped early if somebody uses the machine (REQ-7). Waking from sleep is
+      not somebody using the machine (REQ-8), so a box woken by a relay to run a job
+      does not cancel the request that will let it sleep again afterwards.
+
+      This is what a relay wants: "I am done with this machine, rest when you can."
+      Without it the caller has to poll, which means owning a timer, a retry budget and
+      its own copy of "is it still worth asking" — three things this daemon has already.
+
+      polkit: io.github.ericcanas.Idlectl1.rest — the same action as Rest(). Holding a
+      request reaches nothing Rest() does not; it only keeps trying.
+    -->
+    <method name="RestPending">
+      <arg name="action" type="s" direction="in"/>
+      <!-- Microseconds. Zero is an error: use Rest() to ask exactly once. -->
+      <arg name="ttl_usec" type="t" direction="in"/>
+      <arg name="performed_now" type="b" direction="out"/>
+      <annotation name="io.github.ericcanas.Idlectl1.PolkitAction"
+                  value="io.github.ericcanas.Idlectl1.rest"/>
+    </method>
+
+    <!--
+      Forget a held request. Idempotent; FALSE means there was nothing to forget.
+    -->
+    <method name="CancelPending">
+      <arg name="had_one" type="b" direction="out"/>
+      <annotation name="io.github.ericcanas.Idlectl1.PolkitAction"
+                  value="io.github.ericcanas.Idlectl1.rest"/>
+    </method>
+
+    <!--
       Install a ceiling due immediately for this one action and this one request, and
       perform it.
 

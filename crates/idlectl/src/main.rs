@@ -37,6 +37,8 @@ trait Manager {
     fn doctor(&self) -> zbus::Result<(String, bool)>;
     fn report(&self) -> zbus::Result<String>;
     fn rest(&self, action: &str) -> zbus::Result<bool>;
+    fn rest_pending(&self, action: &str, ttl_usec: u64) -> zbus::Result<bool>;
+    fn cancel_pending(&self) -> zbus::Result<bool>;
     fn rest_forced(&self, action: &str, why: &str) -> zbus::Result<()>;
     fn acquire_lease(
         &self,
@@ -171,6 +173,25 @@ struct RestArgs {
     /// Reason recorded in the journal. Required by --force.
     #[arg(long, value_name = "TEXT")]
     why: Option<String>,
+
+    /// Keep the request for this long if the machine cannot rest yet.
+    ///
+    /// Without it a request that cannot be carried out right now is simply refused, and
+    /// asking again is the caller's problem. With it the daemon holds the request and acts
+    /// the moment the last veto clears, giving up after this long.
+    ///
+    /// It weakens nothing. A held request is re-evaluated with exactly the floors the
+    /// original had, every time: a game that starts afterwards refuses it just as surely as
+    /// one already running would have. It is dropped early if somebody uses the machine.
+    /// Waking from sleep is not somebody using the machine.
+    ///
+    /// This is the flag a relay wants -- "I am done with this box, sleep when you can".
+    #[arg(long, value_name = "DURATION", conflicts_with = "force")]
+    pending: Option<String>,
+
+    /// Forget a held request.
+    #[arg(long, conflicts_with_all = ["pending", "force"])]
+    cancel: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -409,10 +430,42 @@ async fn doctor(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::
 }
 
 async fn rest(manager: &ManagerProxy<'_>, args: RestArgs) -> Result<std::process::ExitCode> {
+    if args.cancel {
+        if manager.cancel_pending().await? {
+            println!("the held request was forgotten");
+        } else {
+            println!("no request was being held");
+        }
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
+
     if args.force {
         let why = args.why.unwrap_or_default();
         manager.rest_forced(&args.action, &why).await?;
         println!("forced {}: {why}", args.action);
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
+
+    if let Some(ttl) = &args.pending {
+        let ttl = idlectl_config::parse_duration(ttl)
+            .map_err(|err| anyhow::anyhow!("--pending: {err}"))?;
+        let usec = u64::try_from(ttl.as_micros()).unwrap_or(u64::MAX);
+        if manager.rest_pending(&args.action, usec).await? {
+            println!("{}: accepted", args.action);
+            return Ok(std::process::ExitCode::SUCCESS);
+        }
+        // Success, not refusal: the machine took the request and will act on it. Exit zero
+        // so that a relay script's `&&` does what its author meant.
+        println!(
+            "{}: held for up to {}, and will happen when every veto clears",
+            args.action,
+            human(ttl)
+        );
+        println!();
+        print!(
+            "{}",
+            manager.explain(&args.action).await.unwrap_or_default()
+        );
         return Ok(std::process::ExitCode::SUCCESS);
     }
 

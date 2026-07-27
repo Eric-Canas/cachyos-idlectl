@@ -15,6 +15,58 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.4.0] - 2026-07-28
+
+Both changes here come from one question: can a machine running this do everything the system it
+was extracted from did? Two answers were no.
+
+### Fixed
+
+- **An action asked for by name is no longer traded for a shallower one.** `rest --now` makes the
+  base schedule contribute `now` for *every* action it names, so `suspend` is due at the same
+  instant as the `poweroff` somebody asked for — and the shallowest-wins rule of [ACT-7] then
+  picked the suspend. `idlectl rest --action poweroff` therefore **suspended the machine and
+  reported the request unsatisfied**: the caller was told no, the machine went to sleep, and a
+  relay that recorded it as powered off had no way to know better. [ACT-7b] names that command as
+  a supported route to a deeper action than the schedule would ever pick, so the promise was not
+  being kept. A requested action is now the only one that may be performed in that evaluation; if
+  it is held, nothing happens. New: [ACT-7c], [TEST-26].
+
+  The same applied to `rest --force --action poweroff` on an already idle machine, where it
+  mattered more: a deliberate, authenticated, logged request quietly doing something shallower.
+
+### Added
+
+- **`idlectl rest --pending <duration>`** — ask, and be remembered if the answer is "not yet"
+  ([REQ-6], previously specified but not implemented). The daemon holds the request and carries it
+  out the moment the last veto clears, giving up at the TTL. Without it, a relay that finds a game
+  running has to own a timer, a retry budget and its own copy of "is it still worth asking" —
+  three things the daemon already has.
+
+  A held request is not a weaker one: every retry evaluates exactly the floors the original did, so
+  a download that starts afterwards refuses it just as surely as one already running would have.
+  What is remembered is the asking, never the answer. It is dropped when somebody uses the machine
+  ([REQ-7]); a resume is not somebody using the machine ([REQ-8]), which is only reliable because
+  0.3.0 stopped the idle clock from moving on a wake. New: [TEST-27].
+
+  `idlectl rest --cancel` forgets it and `idlectl doctor` shows it while it is held. It lives in
+  memory: `idlepolicyd.service` documents that the daemon writes no runtime state anywhere, and
+  that property is worth more than surviving its own restart. The prior system kept this in `/run`
+  because it was not a daemon — a timer ran a script every five minutes, so all of its state had to
+  outlive the process.
+
+- D-Bus: `RestPending(s action, t ttl_usec) -> b performed_now` and `CancelPending() -> b had_one`,
+  both under the existing `io.github.ericcanas.Idlectl1.rest` polkit action. Holding a request
+  reaches nothing `Rest()` does not; it only keeps trying. Existing signatures are unchanged.
+
+### Documentation
+
+- README: **how to let a machine with nobody in front of it be asked to rest.** The shipped polkit
+  default requires authentication from anywhere that is not the seat, which is every ssh session,
+  so a relay got `AccessDenied` and the README did not say what to do about it — the single most
+  likely deployment could not be completed by reading it. Now it carries the rule file, and says to
+  grant `.rest` and never `.rest-forced`.
+
 ## [0.3.0] - 2026-07-28
 
 Both entries here are one defect seen twice: the agent's idle clock was being reset by things

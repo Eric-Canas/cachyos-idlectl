@@ -521,6 +521,24 @@ pub async fn doctor(engine: &Engine) -> (String, bool) {
         }
     }
 
+    // A held request is the other answer to "why is this machine about to sleep", and the
+    // one nobody thinks to ask about, because whoever made it has long since hung up.
+    if let Some(held) = engine.pending {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "held request     {} asked for by uid {}, expires in {}s",
+            held.action.name(),
+            held.uid,
+            held.expires_at.since(now).as_secs()
+        );
+        let _ = writeln!(
+            out,
+            "                 retried on every evaluation with the same vetoes as when it \
+             was made"
+        );
+    }
+
     // 6. Forced actions since boot.
     if !engine.forced.is_empty() {
         let _ = writeln!(out);

@@ -335,7 +335,55 @@ machine with a game running, a download in flight, or a person at the keyboard �
 regression the system this design was extracted from was fixed for, and it stays fixed.
 
 `rest` with no `--action` always means `suspend`. Ending sessions is not something the machine does
-on your behalf: `poweroff` has to be asked for by name, `idlectl rest --action poweroff`.
+on your behalf: `poweroff` has to be asked for by name, `idlectl rest --action poweroff`. The action
+you name is the one you get: if it is held, nothing happens. You will never ask for a `poweroff` and
+be given a `suspend`, which matters most to whatever recorded that the machine was off.
+
+### Asking once, and being remembered
+
+A bare request is a question asked at one instant. If a game is running, the answer is no, and
+asking again is your problem:
+
+```sh
+idlectl rest --action poweroff --pending 8h
+```
+
+With `--pending` the machine keeps the request and carries it out **the moment the last veto
+clears**, giving up after the TTL. This is what a relay wants — "I am done with this box, sleep when
+you can" — and it exits zero when the request is held, so `&&` in a script does what its author
+meant.
+
+It weakens nothing. Every retry evaluates exactly the floors the original did: a download that
+starts *after* the request refuses it just as surely as one already running would have. What is
+remembered is the asking, never the answer. It is dropped early if somebody uses the machine, and
+waking from sleep is not somebody using the machine — a box woken by a relay to run a job does not
+cancel the request that lets it sleep again afterwards. `idlectl rest --cancel` forgets it, and
+`idlectl doctor` shows it while it is held.
+
+The request lives in the daemon's memory, so restarting the daemon forgets it. That direction is the
+safe one: the machine stays awake and somebody has to ask again.
+
+### Machines with nobody in front of them
+
+The shipped polkit default lets anyone **at the machine** ask it to rest, and requires
+authentication from anywhere else — a remote caller cannot see whether somebody is sitting at the
+screen. Every ssh session is "anywhere else" as far as logind is concerned, so a relay gets
+`AccessDenied` until you say otherwise. That is one file:
+
+```js
+// /etc/polkit-1/rules.d/49-idlectl-relay.rules
+polkit.addRule(function(action, subject) {
+    if (action.id == "io.github.ericcanas.Idlectl1.rest" &&
+        subject.user == "relay") {
+        return polkit.Result.YES;
+    }
+});
+```
+
+Grant `.rest` and not `.rest-forced`. Asking is safe to hand out: a game, a download, a held lease,
+an open session and any detector that cannot answer all still refuse it. Forcing defeats every one
+of those including the presence of a human at the keyboard, and nothing reached over the network
+should be able to do that without authenticating.
 
 To override a floor you must say so:
 

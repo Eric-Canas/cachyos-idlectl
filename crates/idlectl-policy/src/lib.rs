@@ -1465,6 +1465,9 @@ pub struct Decision {
     /// is running a degraded configuration and the three sleep actions are floored at
     /// `+infinity`.
     pub config_faults: usize,
+    /// The action a caller asked for by name, carried through from [`Request::requested`]
+    /// so that [`Decision::action_to_perform`] can answer without the request in hand.
+    pub requested: Option<Action>,
 }
 
 impl Decision {
@@ -1509,6 +1512,36 @@ impl Decision {
         Action::ALL
             .into_iter()
             .find(|a| a.is_sleep() && self.get(*a).due)
+    }
+
+    /// The sleep action this evaluation should actually carry out, if any.
+    ///
+    /// Two rules, and which one applies depends on whether anybody asked:
+    ///
+    /// * **Nobody asked** -- the schedule is running on its own. The shallowest due action
+    ///   wins ([ACT-7]): a deeper action is never a safe substitute for a shallower one,
+    ///   because suspend loses nothing and poweroff ends every session on the machine.
+    /// * **Somebody asked for one by name** -- that action, and only that action. If it is
+    ///   held, nothing is performed.
+    ///
+    /// The second rule is not a special case bolted onto the first; it is what makes
+    /// [ACT-7b] true. `rest --now` collapses the base schedule for *every* action it names,
+    /// so `suspend` is due at the same instant as the `poweroff` that was asked for, and
+    /// the shallowest-wins rule would quietly substitute it. The caller would be told its
+    /// request was not satisfied while the machine went to sleep anyway -- a relay would
+    /// record the machine as off, and it would be sitting in S3.
+    ///
+    /// Refusing rather than downgrading is the same principle read in the other direction:
+    /// if the deep action a caller named is held, the answer is "no", not "here is a
+    /// shallower one you did not ask for".
+    #[must_use]
+    pub fn action_to_perform(&self) -> Option<Action> {
+        match self.requested {
+            Some(action) if action.is_sleep() => self.get(action).due.then_some(action),
+            // A request for `screen_off` is not a sleep request and never performs one.
+            Some(_) => None,
+            None => self.shallowest_sleep_due(),
+        }
     }
 
     /// The earliest deadline still in the future, i.e. when the daemon should next
@@ -1568,6 +1601,23 @@ pub struct Request {
     /// is exactly the case a floor-enumerating definition would have missed, because the
     /// doubt floor and the config-fault floor are not blocks.
     pub force: Option<Action>,
+    /// The action a caller asked for **by name**, if this evaluation came from a request.
+    ///
+    /// [ACT-7] makes the shallowest due action win, which is right for the schedule: a
+    /// deeper action is never a safe substitute for a shallower one. It is wrong for a
+    /// request. `--now` makes the base schedule contribute `now` for *every* action it
+    /// names, so a shallower one is due at the same instant, and taking the shallowest
+    /// would answer `idlectl rest --action poweroff` with a suspend -- while reporting the
+    /// request unsatisfied, because the caller asked for something else. The machine would
+    /// then be asleep, the relay would believe it was off, and nothing would say otherwise.
+    ///
+    /// [ACT-7b] names this command as one of the three supported routes to a deeper action
+    /// than the schedule would ever pick. Honouring the name is what makes that true.
+    ///
+    /// When set, the requested action is the **only** one that may be performed: if it is
+    /// held, nothing happens. Substituting a shallower action would be answering a question
+    /// nobody asked.
+    pub requested: Option<Action>,
 }
 
 impl Request {
@@ -1577,6 +1627,7 @@ impl Request {
         Request {
             now: false,
             force: None,
+            requested: None,
         }
     }
 }
@@ -1640,6 +1691,7 @@ pub fn resolve_request(
 
     Decision {
         now: clocks.now,
+        requested: request.requested,
         screen_off: resolve_action(
             Action::ScreenOff,
             policy,
@@ -2371,6 +2423,136 @@ mod tests {
         assert!(decision.screen_off.due);
     }
 
+    /// [ACT-7b] promises `idlectl rest --action poweroff` as the supported way to reach a
+    /// deeper action than the schedule would pick. That promise is only kept if the
+    /// requested action is the one evaluated: `rest --now` makes the base schedule
+    /// contribute `now` for EVERY action, so a shallower one is due at the same instant and
+    /// a selector that takes the shallowest silently substitutes it.
+    ///
+    /// A caller that asked to end every session on the machine and got a suspend has been
+    /// told "done" about something that did not happen.
+    #[test]
+    fn an_explicitly_requested_action_is_not_replaced_by_a_shallower_one() {
+        let now = BootInstant::from_secs(10 * HOUR);
+        let clocks = ClockSnapshot {
+            now,
+            // Nobody has touched it for hours, so the base schedule is long due.
+            human_input: ClockOrigin::At(now.saturating_sub(secs(5 * HOUR))),
+            resume: ClockOrigin::NotYet,
+        };
+        // The vendor shape: the base schedule suspends, and never powers off by itself.
+        let policy = Policy {
+            blocks: vec![block(
+                BlockKind::While,
+                Condition::Always,
+                Clock::HumanInput,
+                Timeouts {
+                    suspend: Some(Timeout::After(secs(30 * MINUTE))),
+                    poweroff: Some(Timeout::Never),
+                    ..Timeouts::default()
+                },
+            )],
+            ..Policy::empty()
+        };
+
+        let decision = evaluate_request(
+            &policy,
+            &FactSet::new(),
+            &clocks,
+            &Request {
+                now: true,
+                force: None,
+                requested: Some(Action::PowerOff),
+            },
+        );
+
+        // Both are due: `--now` collapses the base schedule for every action it names,
+        // including the `never`.
+        assert!(decision.suspend.due, "suspend is due at the same instant");
+        assert!(decision.poweroff.due, "the requested action is due");
+
+        // The whole point: what gets performed is what was asked for.
+        assert_eq!(decision.action_to_perform(), Some(Action::PowerOff));
+    }
+
+    /// With no explicit request the shallowest still wins, which is [ACT-7] and must not
+    /// change: an ordinary schedule that has both due suspends rather than powering off.
+    #[test]
+    fn without_a_request_the_shallowest_action_still_wins() {
+        let now = BootInstant::from_secs(10 * HOUR);
+        let clocks = ClockSnapshot {
+            now,
+            human_input: ClockOrigin::At(now.saturating_sub(secs(9 * HOUR))),
+            resume: ClockOrigin::NotYet,
+        };
+        let policy = Policy {
+            blocks: vec![block(
+                BlockKind::While,
+                Condition::Always,
+                Clock::HumanInput,
+                Timeouts {
+                    suspend: Some(Timeout::After(secs(30 * MINUTE))),
+                    poweroff: Some(Timeout::After(secs(8 * HOUR))),
+                    ..Timeouts::default()
+                },
+            )],
+            ..Policy::empty()
+        };
+
+        let decision = evaluate_request(&policy, &FactSet::new(), &clocks, &Request::none());
+        assert!(decision.suspend.due);
+        assert!(decision.poweroff.due);
+        assert_eq!(decision.action_to_perform(), Some(Action::Suspend));
+    }
+
+    /// A requested action that is NOT due is refused outright rather than downgraded to
+    /// whatever else happens to be due.
+    #[test]
+    fn a_requested_action_that_is_held_performs_nothing() {
+        let now = BootInstant::from_secs(10 * HOUR);
+        let clocks = ClockSnapshot {
+            now,
+            human_input: ClockOrigin::At(now.saturating_sub(secs(5 * HOUR))),
+            resume: ClockOrigin::NotYet,
+        };
+        // A lease holds poweroff for ever; the base schedule still suspends.
+        let policy = Policy {
+            blocks: vec![
+                base_schedule(),
+                block(
+                    BlockKind::While,
+                    Condition::Fact(FactId::LeaseHeld),
+                    Clock::HumanInput,
+                    Timeouts {
+                        poweroff: Some(Timeout::Never),
+                        ..Timeouts::default()
+                    },
+                ),
+            ],
+            ..Policy::empty()
+        };
+        let facts = FactSet::new().with(FactId::LeaseHeld, FactState::True);
+
+        let decision = evaluate_request(
+            &policy,
+            &facts,
+            &clocks,
+            &Request {
+                now: true,
+                force: None,
+                requested: Some(Action::PowerOff),
+            },
+        );
+
+        assert!(decision.suspend.due, "the machine could suspend");
+        assert!(!decision.poweroff.due, "but poweroff is held by the lease");
+        assert_eq!(
+            decision.action_to_perform(),
+            None,
+            "and nothing is performed: a suspend is not a poweroff"
+        );
+    }
+
     /// [REQ-3]. `rest --now` satisfies exactly two blocks, chosen by condition name, and
     /// nothing else -- a human at the keyboard still stops it.
     #[test]
@@ -2398,6 +2580,7 @@ mod tests {
         let request = Request {
             now: true,
             force: None,
+            requested: None,
         };
 
         // A human is present: the two satisfied blocks contribute `now`, but the
@@ -2441,6 +2624,7 @@ mod tests {
             &Request {
                 now: true,
                 force: None,
+                requested: None,
             },
         );
         assert!(
@@ -2459,6 +2643,7 @@ mod tests {
             &Request {
                 now: true,
                 force: Some(Action::Suspend),
+                requested: Some(Action::Suspend),
             },
         );
         assert!(forced.suspend.due);

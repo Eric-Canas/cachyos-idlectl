@@ -971,6 +971,21 @@ own suspend-then-hibernate, which is mechanism rather than policy (§1.1) and wh
 fight; or ask for the deep action explicitly with `idlectl rest --action poweroff`. Mandatory
 vector: [TEST-24].
 
+**[ACT-7c] — a requested action is never traded for a shallower one.** When an action has been
+asked for **by name**, that action is the only one that may be performed in that evaluation. If it
+is held, nothing is performed. The shallowest-wins rule of [ACT-7] governs the schedule acting on
+its own, not a request.
+
+*(Rationale: `--now` makes the base schedule contribute `now` for every action it names, so a
+shallower action is due at the very same instant as the deeper one that was asked for. Under
+shallowest-wins, `idlectl rest --action poweroff` therefore suspends the machine and reports the
+request unsatisfied — the caller is told "no" while the machine goes to sleep, a relay records it as
+powered off, and nothing anywhere says otherwise. [ACT-7b] names this command as a supported route
+to a deeper action than the schedule would ever pick, and this rule is what makes that true.
+Refusing rather than downgrading is the same principle read backwards: if the action somebody named
+is held, the answer is "no", not a different action they did not ask for. Mandatory vector:
+[TEST-26].)*
+
 ### 8.5 The unit must not be conditionally skipped
 
 **[ACT-8]** The service unit shipping `idlepolicyd` MUST NOT carry `Condition*` or `Assert*`
@@ -1072,15 +1087,19 @@ authenticated request may ask it to, and the safety floors still hold.
 **[REQ-6]** A request that cannot fire immediately MAY be held pending, with a TTL. While pending,
 it MUST be re-evaluated on the schedule of [COMP-6].
 
-*(Not implemented in v1, and the omission is what settles the spelling of the command. `MAY` is a
-real MAY: a request that cannot fire is refused, the refusal names what is holding the machine, and
-the caller decides whether to ask again. With no pending mode there is exactly **one** kind of
-request, so `rest` and `rest --now` are the same command. Implementations MUST accept `--now` —
-this document names the command that way throughout and so does every deployment written against
-it — and MUST NOT give the bare `rest` some other meaning, because a flag that silently changes
-which floors are satisfied is the one drift this section cannot tolerate. [REQ-7] and [REQ-8] below
-are consequently vacuous in v1; they are retained rather than withdrawn because they constrain any
-implementation that later adds the pending mode.)*
+*(Implemented. A held request is opt-in and additive: the bare `rest` still asks exactly once, and
+`rest --now` is still the same command as `rest`. What holds a request is a separate flag carrying a
+TTL, and it changes **how long the machine keeps trying**, never **which floors are satisfied** —
+the one drift this section cannot tolerate. Every retry evaluates the identical two satisfied blocks
+the original did, so a veto that arrives after the request refuses it exactly as one already present
+would have. What is remembered is the asking, never the answer.*
+
+*The state is held in memory rather than in a file, and that is a decision rather than an omission.
+The system this was extracted from kept its pending request in `/run` because it was not a daemon at
+all: a timer ran a script every five minutes, so all of its state had to outlive the process. A
+daemon has somewhere better to put it, and the alternative — a file that survives a restart — also
+survives a change of mind. What is lost is a held request across an upgrade of the daemon, and the
+direction of that loss is the safe one: the machine stays awake and somebody has to ask again.)*
 
 **[REQ-7]** A pending request MUST be discarded if the human-input clock advances after the
 request was made. *(Rationale: somebody walked in while the machine was working; the machine now
@@ -1922,6 +1941,16 @@ for one hour and `[while.always] suspend = "30m"`, restarting the session agent 
 implementation that anchors the origin at the restart fails this. Restarting the agent after a gap
 longer than the adoption bound MUST instead report `human_active` as `INDETERMINATE` until the
 first transition — never as active. ([CLK-14], [CLK-15])
+
+**[TEST-26] — a requested action is not downgraded.** With `[while.always] suspend = "30m",
+poweroff = "never"` and the machine idle for longer than 30 m, `rest --action poweroff` MUST either
+power the machine off or do nothing at all. An implementation that suspends it fails, whatever it
+returns to the caller. ([ACT-7c])
+
+**[TEST-27] — a held request outlives a veto and is spent once.** With a request held for an action
+that is currently vetoed, clearing the veto MUST cause that action on the next evaluation, and the
+request MUST NOT survive being carried out. Human input arriving first MUST drop it instead, and a
+resume MUST NOT. ([REQ-6], [REQ-7], [REQ-8])
 
 ### 14.2 What conformance does not cover
 

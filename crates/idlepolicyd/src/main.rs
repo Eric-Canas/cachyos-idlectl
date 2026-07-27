@@ -45,6 +45,7 @@ mod facts;
 mod leases;
 mod logind;
 mod manager;
+mod pending;
 mod polkit;
 mod proc;
 mod report;

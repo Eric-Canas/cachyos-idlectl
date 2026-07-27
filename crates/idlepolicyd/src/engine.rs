@@ -116,6 +116,10 @@ pub struct Engine {
     pub last_eval: Option<BootInstant>,
     pub screen_off_available: bool,
 
+    /// A request accepted but not yet carried out, retried on every evaluation until it
+    /// fires, expires, or a human arrives -- [REQ-6]. In memory on purpose; see `pending`.
+    pub pending: Option<crate::pending::Pending>,
+
     pub forced: Vec<Forced>,
     /// [ACT-2]: at most one power transition in flight at a time.
     transition_in_flight: bool,
@@ -153,6 +157,7 @@ impl Engine {
             clocks: ClockSnapshot::at(now),
             last_eval: None,
             screen_off_available: false,
+            pending: None,
             forced: Vec::new(),
             transition_in_flight: false,
             dry_run,
@@ -276,7 +281,41 @@ impl Engine {
     /// Returns the action performed, if any. `screen_off` is not returned: it is not a
     /// power transition, and reporting it as one would let a caller conclude the machine
     /// went to sleep because the panel went dark.
+    /// Folds any held request into this evaluation, dropping it first if it should no
+    /// longer be retried.
+    ///
+    /// Returns the request to evaluate: the caller's own if nothing is held, otherwise one
+    /// that satisfies the same two blocks `--now` satisfies, for the action that was asked
+    /// for by name.
+    ///
+    /// An explicit request in flight wins over a held one. Somebody asking right now has
+    /// better information than a relay that hung up ten minutes ago.
+    fn resolve_pending(&mut self, request: &Request) -> Request {
+        let Some(held) = self.pending else {
+            return *request;
+        };
+        if let Some(why) = held.dropped_at(self.clocks.now, self.clocks.human_input) {
+            held.log_dropped(why);
+            self.pending = None;
+            return *request;
+        }
+        if request.requested.is_some() || request.force.is_some() {
+            return *request;
+        }
+        Request {
+            now: true,
+            force: None,
+            requested: Some(held.action),
+        }
+    }
+
     pub async fn tick(&mut self, request: &Request) -> Option<Action> {
+        // A held request rides on the ordinary evaluation ([REQ-6]): same schedule, same
+        // vetoes, same two satisfied blocks as when it was first made. Only the asking is
+        // remembered, never the answer -- so a game that started since then still refuses
+        // it, exactly as it would have refused the original.
+        let request = &self.resolve_pending(request);
+
         let decision = self.evaluate(request).await;
 
         // [ACT-6]: the four actions are independent. `screen_off` firing implies nothing
@@ -284,7 +323,7 @@ impl Engine {
         // halves below therefore do not talk to each other.
         self.apply_screen(&decision).await;
 
-        let action = decision.shallowest_sleep_due()?;
+        let action = decision.action_to_perform()?;
 
         if self.transition_in_flight {
             // [ACT-2]. Not an error and not a retry: the previous transition is still
@@ -301,7 +340,7 @@ impl Engine {
         // in which somebody touched a key, and the only thing standing between "the
         // machine suspended while I was using it" and a correct refusal.
         let confirm = self.evaluate(request).await;
-        let Some(confirmed) = confirm.shallowest_sleep_due() else {
+        let Some(confirmed) = confirm.action_to_perform() else {
             info!(?action, "no longer permitted on re-evaluation; not issued");
             return None;
         };
@@ -335,6 +374,10 @@ impl Engine {
 
         match outcome {
             Ok(()) => {
+                // The request has been honoured; there is nothing left to retry.
+                if self.pending.is_some_and(|p| p.action == confirmed) {
+                    self.pending = None;
+                }
                 // [OBS-5]: exactly one record naming the action, the resolved instant, the
                 // winning block, the clock and origin it was measured on, and whether the
                 // action was autonomous, requested or forced.

@@ -180,6 +180,10 @@ impl Manager {
             .tick(&Request {
                 now: true,
                 force: None,
+                // [ACT-7b]: the caller named an action, so that is the one evaluated. It
+                // is never traded for a shallower one that happens to be due at the same
+                // instant, which `--now` guarantees there will be.
+                requested: Some(action),
             })
             .await;
         let accepted = performed == Some(action);
@@ -191,6 +195,94 @@ impl Manager {
             );
         }
         Ok(accepted)
+    }
+
+    /// Ask the machine to rest, and keep the request for up to `ttl_usec` if it cannot be
+    /// carried out yet -- [REQ-6].
+    ///
+    /// Returns `true` only if the action was performed immediately. `false` means it is
+    /// being held, not that it was refused: the machine will carry it out the moment the
+    /// last veto clears, and give up at the TTL.
+    ///
+    /// A held request is not a weaker one. It is re-evaluated on the ordinary schedule with
+    /// exactly the floors the original had, so a game that starts after the request was
+    /// made refuses it just as surely as one already running would have. What is remembered
+    /// is the asking, never the answer.
+    ///
+    /// It is dropped early if somebody uses the machine ([REQ-7]); waking from sleep is not
+    /// somebody using the machine ([REQ-8]).
+    ///
+    /// This is what a relay wants. Without it the caller has to poll, which means owning a
+    /// timer, a retry budget and a copy of "is it still worth asking" -- three things this
+    /// daemon already has.
+    async fn rest_pending(
+        &self,
+        action: &str,
+        ttl_usec: u64,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<bool> {
+        let sender = sender_of(&header)?;
+        polkit::check(&self.bus, &sender, polkit::ACTION_REST).await?;
+        let uid = polkit::caller_uid(&self.bus, &sender).await.unwrap_or(0);
+
+        let action = parse_action(if action.is_empty() { "suspend" } else { action })?;
+        if ttl_usec == 0 {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "a pending request needs a time to live; use Rest() to ask once".into(),
+            ));
+        }
+
+        let mut engine = self.engine.lock().await;
+        let performed = engine
+            .tick(&Request {
+                now: true,
+                force: None,
+                requested: Some(action),
+            })
+            .await;
+        if performed == Some(action) {
+            return Ok(true);
+        }
+
+        // Recorded against the clocks the evaluation just used, not a fresh reading: [REQ-7]
+        // asks whether input arrived *after the request was made*, and the instant the
+        // decision was computed for is when that was.
+        let now = engine.clocks.now;
+        let held = crate::pending::Pending {
+            action,
+            expires_at: now
+                .checked_add(std::time::Duration::from_micros(ttl_usec))
+                .unwrap_or(now),
+            human_origin: engine.clocks.human_input,
+            uid,
+        };
+        info!(
+            action = action.name(),
+            uid,
+            ttl_s = ttl_usec / 1_000_000,
+            "rest request held: it will be carried out when every veto clears"
+        );
+        engine.pending = Some(held);
+        Ok(false)
+    }
+
+    /// Forget a held request. Idempotent; `false` means there was nothing to forget.
+    async fn cancel_pending(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<bool> {
+        let sender = sender_of(&header)?;
+        polkit::check(&self.bus, &sender, polkit::ACTION_REST).await?;
+
+        let mut engine = self.engine.lock().await;
+        let had = engine.pending.take();
+        if let Some(held) = had {
+            info!(
+                action = held.action.name(),
+                "pending rest request cancelled by request"
+            );
+        }
+        Ok(had.is_some())
     }
 
     /// Install a ceiling due immediately for this one action and this one request, and
@@ -239,6 +331,11 @@ impl Manager {
             .tick(&Request {
                 now: false,
                 force: Some(action),
+                // Same reason as in `rest`, and it matters more here: the ceiling makes the
+                // named action due, but on an already idle machine a shallower one is due
+                // too, and a forced poweroff that quietly suspended would be the worst
+                // possible answer to a deliberate, authenticated, logged request.
+                requested: Some(action),
             })
             .await;
         Ok(())
