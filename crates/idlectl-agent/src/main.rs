@@ -154,7 +154,7 @@ impl AgentInterface {
         Ok(())
     }
 
-    /// What the outputs are doing -- preferring what the display server reported over what
+    /// What the outputs are doing, preferring what the display server reported over what
     /// this agent asked for, and falling back to the request only where the display server
     /// volunteers nothing (X11).
     #[zbus(property)]

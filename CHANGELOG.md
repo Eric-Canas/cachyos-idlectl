@@ -15,6 +15,34 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.5.2] - 2026-07-28
+
+### Fixed
+
+- **The introspection XML the daemon serves at runtime was not well-formed**, so every client
+  that introspects before calling — dbus-python, `gdbus`, anything generating bindings — failed
+  to parse the object:
+
+  ```
+  Introspect error on :1.256:/io/github/ericcanas/Idlectl1:
+  not well-formed (invalid token): line 58, column 23
+  ```
+
+  zbus copies the Rust doc comments of an exposed interface **verbatim** into that document,
+  and XML forbids a double hyphen inside a comment with no escape for it. One comment on
+  `RestPending` had a dash pair in it, and that was enough to invalidate the whole node.
+
+  This is the same root cause as the polkit action that silently refused every unprivileged
+  caller in 0.4.2, and as the logo that served HTTP 200 while every browser drew a broken
+  image in 0.4.6. Third place, third mechanism: a comment that is not XML *until something
+  else makes it XML*. What let this one survive is that the call still worked — the parse error
+  goes to the client's stderr and nothing in the daemon ever mentions it.
+
+  `scripts/preflight-publish.sh` gained a step for it. The rule is deliberately broader than
+  the defect: no double hyphen in any doc comment in a file that declares a zbus interface,
+  including the ones on tests, because telling those apart needs a Rust parser and the cost of
+  complying is a comma.
+
 ## [0.5.1] - 2026-07-28
 
 ### Fixed

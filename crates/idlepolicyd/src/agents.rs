@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(origin, ClockOrigin::At(BootInstant::from_secs(990)));
     }
 
-    /// [HUM-5] case 2 -- and the reason a headless machine can still go back to sleep.
+    /// [HUM-5] case 2, and the reason a headless machine can still go back to sleep.
     #[test]
     fn no_agent_and_no_graphical_session_is_false_not_doubt() {
         let reg = Registry::default();
@@ -430,7 +430,7 @@ mod tests {
         );
     }
 
-    /// Two seats, two agents, and each one can only see its own processes -- which is the
+    /// Two seats, two agents, and each one can only see its own processes, which is the
     /// whole reason this fact is reported rather than read. Losing one session's holders
     /// here loses the GPU memory of whatever is running in it, and the machine suspends
     /// with a game on the other seat.
@@ -471,7 +471,7 @@ mod tests {
 
     /// A dead agent's last report is not evidence about the machine now. Keeping its
     /// holders would pin a machine awake on the memory of a process that exited with the
-    /// session -- and nothing would ever contradict the reading, because the agent that
+    /// session, and nothing would ever contradict the reading, because the agent that
     /// would have said so is gone.
     #[test]
     fn a_stale_agent_contributes_no_gpu_holders() {

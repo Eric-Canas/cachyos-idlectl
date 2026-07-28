@@ -4,6 +4,19 @@
 //! path of its own, which is deliberate — anything the command-line tool can do, a script,
 //! a desktop applet or a remote relay can do too, through the same authorization checks.
 //!
+//! # No double hyphen in the `///` comments of the interface below
+//!
+//! zbus copies those **verbatim** into the introspection XML it serves at runtime, and XML
+//! forbids a double hyphen inside a comment, with no escape for it. One of them therefore
+//! produces a document that every client introspecting before it calls — dbus-python,
+//! gdbus, anything generating bindings — cannot parse. Measured: one `RestPending` comment
+//! had a dash pair before `[REQ-6]`, and dbus-python answered `not well-formed (invalid
+//! token): line 58, column 23` for the whole object.
+//!
+//! What let it survive is that the call still worked: the parse error goes to the client's
+//! stderr, and nothing in this daemon ever mentions it. `scripts/preflight-publish.sh` now
+//! refuses to publish one, here or in any other file that declares an interface.
+//!
 //! # Time on the wire
 //!
 //! Microseconds on `CLOCK_BOOTTIME`, matching logind's own convention, with `UINT64_MAX`
@@ -30,8 +43,8 @@ pub const OBJECT_PATH: &str = "/io/github/ericcanas/Idlectl1";
 /// How many GPU memory holders one agent may report, and how long each name may be.
 ///
 /// [ACT-10]: state written by an unprivileged caller is parsed explicitly and bounded.
-/// Nothing an agent reports here can make the machine sleep -- a holder only ever adds a
-/// reason to stay awake -- but an agent reporting a million of them, or one whose "process
+/// Nothing an agent reports here can make the machine sleep (a holder only ever adds a
+/// reason to stay awake), but an agent reporting a million of them, or one whose "process
 /// name" is a megabyte of text, would grow this daemon's memory and its log lines without
 /// limit. Both bounds are far above any real machine: a session has a handful of processes
 /// holding GPU memory, and a process name is a filename.
@@ -217,7 +230,7 @@ impl Manager {
     }
 
     /// Ask the machine to rest, and keep the request for up to `ttl_usec` if it cannot be
-    /// carried out yet -- [REQ-6].
+    /// carried out yet: [REQ-6].
     ///
     /// Returns `true` only if the action was performed immediately. `false` means it is
     /// being held, not that it was refused: the machine will carry it out the moment the
@@ -232,7 +245,7 @@ impl Manager {
     /// somebody using the machine ([REQ-8]).
     ///
     /// This is what a relay wants. Without it the caller has to poll, which means owning a
-    /// timer, a retry budget and a copy of "is it still worth asking" -- three things this
+    /// timer, a retry budget and a copy of "is it still worth asking": three things this
     /// daemon already has.
     async fn rest_pending(
         &self,
@@ -564,7 +577,7 @@ impl Manager {
     /// uid that holds DRM memory, already de-duplicated per DRM client id. It is reported
     /// for a permission reason rather than a bus one: `/proc/<pid>/fdinfo` is mode 0555 and
     /// still gated by `ptrace_may_access`, so reading another user's needs `CAP_SYS_PTRACE`
-    /// -- measured -- which is the ability to read any process's memory and not something a
+    /// (measured), which is the ability to read any process's memory and not something a
     /// daemon that can power the machine off is given in order to attribute video RAM. The
     /// list is **raw**: the threshold, the desktop exclusion and the attribution to a game
     /// all happen in this daemon, in [`crate::facts::gpu`].
@@ -714,7 +727,7 @@ mod tests {
 
     /// The name is truncated by characters. Slicing a multi-byte string on a byte index
     /// that is not a character boundary panics, and this string arrives from another
-    /// process's command line -- a filename with an accent in it is enough.
+    /// process's command line: a filename with an accent in it is enough.
     #[test]
     fn truncating_a_name_cannot_panic_on_a_multibyte_character() {
         // Written as an escape rather than as the literal character so this file stays

@@ -524,6 +524,37 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# The same `--` again, in the third place it can hide -- and the only one the
+# step above cannot see, because the document does not exist until the daemon is
+# running.
+#
+# zbus copies the Rust doc comments of an exposed interface VERBATIM into the
+# introspection XML it serves at runtime.  A `--` in one of those comments makes
+# that document not well-formed, so every client that introspects before calling
+# -- dbus-python, gdbus, d-feet, anything generating bindings -- fails to parse
+# it.  Measured: `Introspect error ... not well-formed (invalid token): line 58,
+# column 23`, from a doc comment reading "carried out yet -- [REQ-6]".  The call
+# still worked, which is what made it survive: the error goes to the client's
+# stderr and nothing in this daemon ever mentions it.
+#
+# The rule is deliberately BROADER than the defect: no `--` in any doc comment in
+# a file that declares a zbus interface, including the ones on tests, because
+# telling those apart needs a Rust parser and the cost of complying is a comma.
+step "doc comments in D-Bus interface files carry no XML-illegal double hyphen"
+iface_files=$(git grep -l 'zbus::interface' -- '*.rs' 2>/dev/null || true)
+if [ -z "$iface_files" ]; then
+  ok_because "no file declares a zbus interface"
+else
+  rc=0
+  # shellcheck disable=SC2086
+  grep -n '^[[:space:]]*///.*--' $iface_files >"$WORK/out" 2>/dev/null && rc=1
+  if [ "$rc" -eq 0 ]; then ok; else
+    bad "these doc comments become an unparseable introspection XML at runtime"
+    indent_file "$WORK/out"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n'
 if [ "$FAILED" -gt 0 ]; then
   printf '%s: %s of %s checks FAILED -- do not publish.\n' "$PROG" "$FAILED" "$STEP" >&2
