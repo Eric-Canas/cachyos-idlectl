@@ -217,12 +217,22 @@ facts
 session agents
   agent :1.418 in session 2 (uid 1000), can_blank=true, 0 GPU holder(s), last report 4s ago
 
-screen_off       available
+screen_off        available
+suspend           available
+hibernate         UNAVAILABLE: logind answers "na" — this machine cannot hibernate
+                  Usually swap smaller than RAM, swap on zram, or no resume= on
+                  the kernel command line. Not a fault unless you configured it.
+poweroff          available
 ```
 
 `doctor` always names the *other* candidate owners of power ([OBS-3].11). Two components each
 believing they own the suspend decision is the bug this project exists to remove, and it fails
 silently.
+
+It also asks whether each action has a mechanism at all rather than finding out at the moment of
+truth. `hibernate` reading `UNAVAILABLE` is the common case and not a fault; `suspend` or `poweroff`
+reading it makes the report unhealthy, because an idle daemon that cannot rest the machine has
+nothing left to offer.
 
 ### `idlectl lease` — "I am working, do not sleep"
 
@@ -238,6 +248,17 @@ job that survives but hangs.
 $ idlectl lease list
 backup                   uid 1000   expires in 1h59m       nightly backup
 ```
+
+Two things worth knowing before you hold one over SSH:
+
+- **Do not detach it with `nohup setsid`.** The process stays inside the login session's scope, so
+  the session never closes, `remote_session` stays true, and the machine will not sleep again for the
+  rest of the boot. That is [FACT-10] working as intended — and the session age `doctor` prints is
+  how you recognise it. To hold a lease outside the session:
+  `systemd-run --user --unit=mylease idlectl lease acquire job --ttl 1h -- sleep 3600`.
+- **Restarting the daemon releases every lease**, because the lease *is* a descriptor held against
+  it. The client stays alive believing it is protecting the machine. If you must restart
+  `idlepolicyd`, restart it first and take the lease afterwards.
 
 ---
 
