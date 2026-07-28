@@ -47,7 +47,7 @@ nothing.
 
 **Order never matters, and there is no priority list to get wrong.**
 
-> **Status: `0.4.5`, and working.** The daemon, the CLI and the session agent are implemented, and
+> **Status: `0.4.6`, and working.** The daemon, the CLI and the session agent are implemented, and
 > everything below has been exercised on a real CachyOS machine: the eleven facts, the decision
 > loop, leases, held requests, polkit authorization, resume detection across a genuine `deep`
 > suspend, and blanking on KWin — verified by watching the panel go dark, not by trusting the call
@@ -162,7 +162,7 @@ Four commands. All of them take `--json`, and none of them need root.
 
 ```console
 $ idlectl status
-idlepolicyd 0.4.5
+idlepolicyd 0.4.6
 layer      /usr/lib/idlectl/idlectl.toml
 layer      /etc/idlectl/idlectl.toml
 

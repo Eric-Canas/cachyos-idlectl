@@ -26,6 +26,51 @@ use idlectl_config::{ADMIN_CONFIG, DROPIN_DIR, Source, VENDOR_CONFIG};
 const BUS_NAME: &str = "io.github.ericcanas.Idlectl1";
 const OBJECT_PATH: &str = "/io/github/ericcanas/Idlectl1";
 
+/// `println!`, except that a closed pipe is not a crash.
+///
+/// Rust sets `SIGPIPE` to `SIG_IGN` before `main` runs, so writing to a closed pipe returns
+/// `EPIPE` and the `println!` machinery panics with a backtrace. `idlectl status | head` is
+/// an entirely ordinary thing to type — it is in this project's own documentation — and it
+/// must not produce one.
+///
+/// The usual fix is to restore the default signal handler, which needs `unsafe`; this crate
+/// forbids it, so the write is checked instead. Every path that prints to stdout goes
+/// through here.
+/// Formatting happens here rather than inside [`write_str`] for a reason that is not
+/// stylistic: an argument may contain `.await`, and a closure passed to a helper is not an
+/// async context. Formatting at the call site keeps `outln!("{}", x.await?)` legal.
+macro_rules! outln {
+    () => { crate::write_str("\n") };
+    ($($arg:tt)*) => {{
+        let mut line = format!($($arg)*);
+        line.push('\n');
+        crate::write_str(&line);
+    }};
+}
+
+/// `print!`, with the same guarantee. For text that already ends in a newline.
+macro_rules! out {
+    ($($arg:tt)*) => { crate::write_str(&format!($($arg)*)) };
+}
+
+/// Writes to stdout, and turns a closed pipe into a quiet, successful exit.
+///
+/// Zero rather than `128 + SIGPIPE`: the pipe closed because whatever was reading has all it
+/// wanted, which is not a failure of this program. Any *other* write error is real and is
+/// reported — a full disk on a redirected stdout must not look like success.
+fn write_str(text: &str) {
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    match out.write_all(text.as_bytes()) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => std::process::exit(0),
+        Err(err) => {
+            eprintln!("idlectl: cannot write to stdout: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[zbus::proxy(
     interface = "io.github.ericcanas.Idlectl1.Manager",
     default_service = "io.github.ericcanas.Idlectl1",
@@ -269,7 +314,7 @@ fn run(cli: Cli) -> Result<std::process::ExitCode> {
             Command::Reload => {
                 let layers = manager.reload().await?;
                 for layer in layers {
-                    println!("{layer}");
+                    outln!("{layer}");
                 }
                 Ok(std::process::ExitCode::SUCCESS)
             }
@@ -356,26 +401,26 @@ fn human(d: std::time::Duration) -> String {
 
 async fn status(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::ExitCode> {
     if json {
-        println!("{}", manager.report().await?);
+        outln!("{}", manager.report().await?);
         return Ok(std::process::ExitCode::SUCCESS);
     }
 
-    println!("idlepolicyd {}", manager.version().await?);
+    outln!("idlepolicyd {}", manager.version().await?);
     if manager.dry_run().await.unwrap_or(false) {
-        println!("MODE       dry run: decisions are logged and never applied");
+        outln!("MODE       dry run: decisions are logged and never applied");
     }
     for layer in manager.config_layers().await? {
-        println!("layer      {layer}");
+        outln!("layer      {layer}");
     }
 
-    println!();
-    println!("facts");
+    outln!();
+    outln!("facts");
     for (name, state) in manager.facts().await? {
-        println!("  {name:<20} {state}");
+        outln!("  {name:<20} {state}");
     }
 
-    println!();
-    println!("actions");
+    outln!();
+    outln!("actions");
     for (name, deadline, due) in manager.deadlines().await? {
         let when = if due {
             "DUE".to_owned()
@@ -389,7 +434,7 @@ async fn status(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::
                 None => format!("at +{}s since boot", deadline / 1_000_000),
             }
         };
-        println!("  {name:<20} {when}");
+        outln!("  {name:<20} {when}");
     }
 
     // Leases and held requests are the only two things that can keep this machine awake
@@ -399,8 +444,8 @@ async fn status(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::
     let leases = manager.list_leases().await.unwrap_or_default();
     let pending = manager.pending().await.unwrap_or_default();
     if !leases.is_empty() || !pending.is_empty() {
-        println!();
-        println!("holding this machine awake");
+        outln!();
+        outln!("holding this machine awake");
         for (who, why, _acquired, expires, uid) in &leases {
             let when = in_from_now(*expires).unwrap_or_else(|| "expired".to_owned());
             let reason = if why.is_empty() {
@@ -408,18 +453,18 @@ async fn status(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::
             } else {
                 format!("  \u{2014} {why}")
             };
-            println!("  lease    {who:<22} uid {uid:<6} {when}{reason}");
+            outln!("  lease    {who:<22} uid {uid:<6} {when}{reason}");
         }
         for (action, expires, uid) in &pending {
             let when = in_from_now(*expires).unwrap_or_else(|| "expiring".to_owned());
-            println!(
+            outln!(
                 "  request  {action:<22} uid {uid:<6} {when}  \u{2014} will happen when every veto clears"
             );
         }
     }
 
-    println!();
-    println!(
+    outln!();
+    outln!(
         "Run `idlectl explain` for the whole computation, or `idlectl doctor` for what is broken."
     );
     Ok(std::process::ExitCode::SUCCESS)
@@ -431,10 +476,10 @@ async fn explain(
     json: bool,
 ) -> Result<std::process::ExitCode> {
     if json {
-        println!("{}", manager.report().await?);
+        outln!("{}", manager.report().await?);
         return Ok(std::process::ExitCode::SUCCESS);
     }
-    print!(
+    out!(
         "{}",
         manager.explain(action.as_deref().unwrap_or("")).await?
     );
@@ -444,9 +489,9 @@ async fn explain(
 async fn doctor(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::ExitCode> {
     let (text, healthy) = manager.doctor().await?;
     if json {
-        println!("{}", manager.report().await?);
+        outln!("{}", manager.report().await?);
     } else {
-        print!("{text}");
+        out!("{text}");
     }
     // The exit status is the daemon's verdict, not a re-derivation from the text. A client
     // that parsed prose to decide would disagree with the daemon the first time a word
@@ -461,9 +506,9 @@ async fn doctor(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::
 async fn rest(manager: &ManagerProxy<'_>, args: RestArgs) -> Result<std::process::ExitCode> {
     if args.cancel {
         if manager.cancel_pending().await? {
-            println!("the held request was forgotten");
+            outln!("the held request was forgotten");
         } else {
-            println!("no request was being held");
+            outln!("no request was being held");
         }
         return Ok(std::process::ExitCode::SUCCESS);
     }
@@ -471,7 +516,7 @@ async fn rest(manager: &ManagerProxy<'_>, args: RestArgs) -> Result<std::process
     if args.force {
         let why = args.why.unwrap_or_default();
         manager.rest_forced(&args.action, &why).await?;
-        println!("forced {}: {why}", args.action);
+        outln!("forced {}: {why}", args.action);
         return Ok(std::process::ExitCode::SUCCESS);
     }
 
@@ -480,18 +525,18 @@ async fn rest(manager: &ManagerProxy<'_>, args: RestArgs) -> Result<std::process
             .map_err(|err| anyhow::anyhow!("--pending: {err}"))?;
         let usec = u64::try_from(ttl.as_micros()).unwrap_or(u64::MAX);
         if manager.rest_pending(&args.action, usec).await? {
-            println!("{}: accepted", args.action);
+            outln!("{}: accepted", args.action);
             return Ok(std::process::ExitCode::SUCCESS);
         }
         // Success, not refusal: the machine took the request and will act on it. Exit zero
         // so that a relay script's `&&` does what its author meant.
-        println!(
+        outln!(
             "{}: held for up to {}, and will happen when every veto clears",
             args.action,
             human(ttl)
         );
-        println!();
-        print!(
+        outln!();
+        out!(
             "{}",
             manager.explain(&args.action).await.unwrap_or_default()
         );
@@ -499,15 +544,15 @@ async fn rest(manager: &ManagerProxy<'_>, args: RestArgs) -> Result<std::process
     }
 
     if manager.rest(&args.action).await? {
-        println!("{}: accepted", args.action);
+        outln!("{}: accepted", args.action);
         return Ok(std::process::ExitCode::SUCCESS);
     }
 
     // Not an error. Something is still holding the machine awake, and the next line says
     // what -- which is the whole reason a refusal is worth more than a silent no-op.
-    println!("{}: refused, the machine is not free to rest", args.action);
-    println!();
-    print!(
+    outln!("{}: refused, the machine is not free to rest", args.action);
+    outln!();
+    out!(
         "{}",
         manager.explain(&args.action).await.unwrap_or_default()
     );
@@ -559,7 +604,7 @@ async fn lease(
         }
         LeaseCommand::Release { id } => {
             if manager.release_lease(&id).await? {
-                println!("released {id}");
+                outln!("released {id}");
                 Ok(std::process::ExitCode::SUCCESS)
             } else {
                 bail!("no lease named {id} is held")
@@ -580,16 +625,16 @@ async fn lease(
                         })
                     })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&rows)?);
+                outln!("{}", serde_json::to_string_pretty(&rows)?);
             } else if leases.is_empty() {
-                println!("no leases held");
+                outln!("no leases held");
             } else {
                 for (who, why, _acquired, expires, uid) in leases {
                     let when = in_from_now(expires).map_or_else(
                         || format!("expires at +{}s since boot", expires / 1_000_000),
                         |relative| format!("expires {relative}"),
                     );
-                    println!("{who:<24} uid {uid:<6} {when:<22} {why}");
+                    outln!("{who:<24} uid {uid:<6} {when:<22} {why}");
                 }
             }
             Ok(std::process::ExitCode::SUCCESS)
@@ -647,7 +692,7 @@ fn check_config(files: Vec<PathBuf>, json: bool) -> Result<std::process::ExitCod
                 .collect::<Vec<_>>(),
             "policy": loaded.policy,
         });
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        outln!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(if faults.is_empty() {
             std::process::ExitCode::SUCCESS
         } else {
@@ -656,17 +701,17 @@ fn check_config(files: Vec<PathBuf>, json: bool) -> Result<std::process::ExitCod
     }
 
     for layer in &loaded.layers {
-        println!("layer   {layer}");
+        outln!("layer   {layer}");
     }
-    println!("min_idle {:?}", loaded.policy.min_idle);
-    println!();
+    outln!("min_idle {:?}", loaded.policy.min_idle);
+    outln!();
 
     for block in &loaded.policy.blocks {
         let status = if block.enabled { "" } else { "  (disabled)" };
-        println!("[{}]  clock = {}{}", block.id, block.clock, status);
+        outln!("[{}]  clock = {}{}", block.id, block.clock, status);
         for action in idlectl_policy::Action::ALL {
             if let Some(timeout) = block.timeouts.get(action) {
-                println!(
+                outln!(
                     "    {:<11} {}",
                     action.name(),
                     idlectl_config::format_timeout(timeout)
@@ -676,9 +721,9 @@ fn check_config(files: Vec<PathBuf>, json: bool) -> Result<std::process::ExitCod
     }
 
     if !loaded.warnings.is_empty() {
-        println!();
+        outln!();
         for warning in &loaded.warnings {
-            println!("warning: {warning}");
+            outln!("warning: {warning}");
         }
     }
 
@@ -695,8 +740,8 @@ fn check_config(files: Vec<PathBuf>, json: bool) -> Result<std::process::ExitCod
         return Ok(std::process::ExitCode::FAILURE);
     }
 
-    println!();
-    println!(
+    outln!();
+    outln!(
         "{} block(s), configuration is valid.",
         loaded.policy.blocks.len()
     );

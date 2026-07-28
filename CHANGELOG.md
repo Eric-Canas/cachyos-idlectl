@@ -15,6 +15,28 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.4.6] - 2026-07-28
+
+### Fixed
+
+- **`idlectl status | head` no longer panics.** Rust sets `SIGPIPE` to `SIG_IGN` before `main`, so
+  writing to a closed pipe returns `EPIPE` and the `println!` machinery panics with a backtrace:
+
+  ```
+  thread 'main' panicked at library/std/src/io/stdio.rs:1166:9:
+  failed printing to stdout: Broken pipe (os error 32)
+  ```
+
+  Piping into `head`, `grep -q` or `less` and quitting early is an entirely ordinary thing to type
+  — it appears in this project's own documentation — and a diagnostic tool that produces a
+  backtrace when you do it is a diagnostic tool people stop trusting.
+
+  The usual fix is to restore the default signal handler, which needs `unsafe`; every crate here
+  is `#![forbid(unsafe_code)]`, so the write is checked instead and a closed pipe exits **zero**.
+  Zero rather than `128 + SIGPIPE` because the reader closed the pipe having got what it wanted,
+  which is not this program failing. Any other write error — a full disk on a redirected stdout —
+  is still reported and still exits non-zero.
+
 ## [0.4.5] - 2026-07-28
 
 ### Added
