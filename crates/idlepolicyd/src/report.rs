@@ -472,17 +472,72 @@ pub async fn doctor(engine: &Engine) -> (String, bool) {
         );
     }
 
-    // 12. Whether screen_off is available as an action at all.
+    // 12. Whether each action has a mechanism at all, per [ACT-13].
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "screen_off       {}",
+        "screen_off        {}",
         if engine.screen_off_available {
             "available"
         } else {
             "UNAVAILABLE: no agent offers a blanking mechanism"
         }
     );
+    // Deliberately NOT a health failure: a machine with no graphical session has no agent
+    // and no panel to blank, and calling that broken would make `doctor` red on every
+    // server. The line is the report.
+
+    // The same question for the three actions logind carries out. Asked of logind rather
+    // than worked out here -- see `LogindManagerProxy::can_suspend` for why a second
+    // opinion would be worse than no opinion.
+    if let Ok(manager) = crate::logind::LogindManagerProxy::new(&engine.bus).await {
+        for (action, answer) in [
+            ("suspend", manager.can_suspend().await),
+            ("hibernate", manager.can_hibernate().await),
+            ("poweroff", manager.can_power_off().await),
+        ] {
+            let detail = match answer.as_deref() {
+                // "yes" and "challenge" are both available to this daemon: a challenge is
+                // what an unprivileged caller would face, and this one is root.
+                Ok("yes" | "challenge") => None,
+                Ok("na") => Some(format!(
+                    "UNAVAILABLE: logind answers \"na\" — this machine cannot {action}"
+                )),
+                Ok("no") => Some(
+                    "UNAVAILABLE: logind answers \"no\" — forbidden by its own policy".to_owned(),
+                ),
+                Ok(other) => Some(format!("unknown: logind answered \"{other}\"")),
+                Err(err) => Some(format!("unknown: logind did not answer ({err})")),
+            };
+            match detail {
+                None => {
+                    let _ = writeln!(out, "{action:<17} available");
+                }
+                Some(detail) => {
+                    // hibernate is exempt from the verdict on purpose. A machine with no
+                    // hibernation swap is an ordinary machine rather than a broken one, and
+                    // most are: measured here on a machine whose only swap is zram, which
+                    // cannot hold an image of the RAM it lives in. suspend and poweroff are
+                    // not exempt -- an idle daemon that cannot rest the machine has nothing
+                    // left to offer.
+                    if action != "hibernate" {
+                        healthy = false;
+                    }
+                    let _ = writeln!(out, "{action:<17} {detail}");
+                    if action == "hibernate" {
+                        let _ = writeln!(
+                            out,
+                            "                  Usually swap smaller than RAM, swap on zram, or no resume= on"
+                        );
+                        let _ = writeln!(
+                            out,
+                            "                  the kernel command line. Not a fault unless you configured it."
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     // 13. [OBS-8]: the screen the display server reports, against the one this daemon
     // asked for. Not a fault -- the daemon is working as designed and is deliberately not

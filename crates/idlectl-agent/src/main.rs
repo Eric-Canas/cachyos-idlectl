@@ -283,6 +283,13 @@ async fn serve(backend: Arc<dyn Backend>) -> Result<()> {
         "registered with idlepolicyd"
     );
 
+    // What the daemon was last told about blanking. It stores the value handed to
+    // `RegisterAgent`, so a capability that only turned up afterwards has to be announced
+    // or the daemon will believe this session cannot blank for as long as it lasts. See
+    // `BlankState` in the Wayland backend for the cold boot where the protocol arrived
+    // half a minute after the agent did.
+    let mut announced_can_blank = backend.can_blank();
+
     let mut last_state: Option<bool> = None;
     loop {
         let idle = backend.idle();
@@ -307,6 +314,22 @@ async fn serve(backend: Arc<dyn Backend>) -> Result<()> {
                 info!("the idle protocol is answering again");
             }
             last_state = Some(broken);
+        }
+
+        if backend.can_blank() != announced_can_blank {
+            match register(&manager, &session_id, backend.can_blank()).await {
+                Ok(_) => {
+                    announced_can_blank = backend.can_blank();
+                    info!(
+                        can_blank = announced_can_blank,
+                        backend = backend.describe(),
+                        "the blanking capability changed; re-registered"
+                    );
+                }
+                Err(err) => {
+                    warn!(error = %format!("{err:#}"), "cannot announce the blanking capability");
+                }
+            }
         }
 
         if let Err(err) = manager

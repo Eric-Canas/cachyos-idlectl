@@ -264,6 +264,10 @@ async fn serve(sources: Sources, dry_run: bool) -> Result<()> {
             Event::Resume => {
                 let mut guard = engine.lock().await;
                 guard.resume.note_announced_resume(clock::now());
+                // The suspend this daemon issued has completed. Until this point a second
+                // attempt would be refused by logind with `OperationInProgress`, which is
+                // how every ordinary suspend used to log a warning.
+                guard.note_transition_finished();
                 info!("resume announced by logind");
             }
             Event::BusClosed => {

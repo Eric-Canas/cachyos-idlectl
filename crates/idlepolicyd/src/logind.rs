@@ -41,6 +41,26 @@ pub trait LogindManager {
     fn hibernate(&self, interactive: bool) -> zbus::Result<()>;
     fn power_off(&self, interactive: bool) -> zbus::Result<()>;
 
+    /// Whether the machine can perform each action at all: `"yes"`, `"no"`, `"na"` or
+    /// `"challenge"`.
+    ///
+    /// `"na"` means the machine is not capable of it. For hibernate that is the common case
+    /// and it is invisible until the moment of truth: measured on a machine whose only swap
+    /// is zram and which has no `resume=` on its kernel command line, logind answered `na`
+    /// and `doctor` reported nothing, while a forced hibernate came back with
+    /// `SleepVerbNotSupported: Not enough suitable swap space`. [ACT-13] says an action
+    /// with no mechanism is reported as unavailable rather than merely failing later.
+    ///
+    /// Read rather than recomputed. logind already inspects the swap devices, the resume
+    /// configuration and `/sys/power/state`; deriving that again here would be a second
+    /// opinion that can disagree with the mechanism which will actually run.
+    ///
+    /// `"challenge"` is not unavailable — it means an unprivileged caller would be asked to
+    /// authenticate, and this daemon is root.
+    fn can_suspend(&self) -> zbus::Result<String>;
+    fn can_hibernate(&self) -> zbus::Result<String>;
+    fn can_power_off(&self) -> zbus::Result<String>;
+
     /// Colon-separated list of what is currently inhibited in `block` mode.
     ///
     /// Read in preference to filtering [`LogindManagerProxy::list_inhibitors`] because it
@@ -103,14 +123,21 @@ pub trait LogindSession {
     #[zbus(property)]
     fn active(&self) -> zbus::Result<bool>;
 
-    /// When the session started, on `CLOCK_MONOTONIC`, in microseconds.
+    /// When the session started, in microseconds since the Unix epoch.
     ///
     /// Reported by `doctor` per [FACT-10]: a process detached with `setsid` from a remote
     /// shell stays inside the session scope, so the session never closes and this fact
     /// becomes a permanent veto for the rest of the boot. Showing the age is what lets
     /// somebody recognise that shape instead of hunting a detector bug.
+    ///
+    /// `TimestampMonotonic` is deliberately not used, for two reasons that both bite on
+    /// exactly the machines this daemon is for. It is an absolute reading rather than an
+    /// elapsed one, so it has to be subtracted from a matching now — and this daemon's
+    /// clock is `CLOCK_BOOTTIME`, which is not that now. And `CLOCK_MONOTONIC` stops
+    /// during a suspend, so even subtracted correctly it under-reports by however long
+    /// the machine slept.
     #[zbus(property)]
-    fn timestamp_monotonic(&self) -> zbus::Result<u64>;
+    fn timestamp(&self) -> zbus::Result<u64>;
 
     #[zbus(property)]
     fn name(&self) -> zbus::Result<String>;

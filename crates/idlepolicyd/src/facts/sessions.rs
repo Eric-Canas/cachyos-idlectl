@@ -1,9 +1,33 @@
 //! `remote_session` and `inhibitor_block`. Both read logind and nothing else.
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use idlectl_policy::FactState;
 
 use super::{Context, Reading, ago};
 use crate::logind::{LogindManagerProxy, LogindSessionProxy};
+
+/// How long ago a session opened, from logind's realtime `Timestamp`.
+///
+/// Split out from [`remote`] so that the property which actually matters can be checked
+/// without a bus: the number must get SMALLER as a session gets newer.
+///
+/// It exists because the first implementation handed logind's absolute timestamp straight
+/// to [`ago`], which is an elapsed-duration formatter. Every session then reported the
+/// same figure — uptime minus suspended time — and the later of two sessions reported the
+/// LARGER one, so a session opened seconds ago read as "8h24m ago". Measured on a machine
+/// with 14h37m of suspend behind it. [FACT-10] says the age is what makes a session-scope
+/// veto recognisable rather than looking like a broken detector; printed that way it did
+/// the opposite, and made a healthy detector look broken.
+fn session_age(opened_usec: u64, now: SystemTime) -> String {
+    let Some(opened) = UNIX_EPOCH.checked_add(Duration::from_micros(opened_usec)) else {
+        return "age unknown".to_owned();
+    };
+    // A session stamped in the future is a clock that moved, not an age. Saying so is
+    // better than rendering a wrapped duration.
+    now.duration_since(opened)
+        .map_or_else(|_| "age unknown".to_owned(), ago)
+}
 
 /// [FACT-8]: true iff logind reports at least one open **user** session that is remote.
 ///
@@ -76,12 +100,10 @@ pub async fn remote(ctx: &Context<'_>) -> Reading {
         // diagnostic technique and an illegitimate way to leave something running -- a
         // lease is the mechanism for the latter -- and the age is what makes the shape
         // recognisable instead of looking like a broken detector.
-        let age = session
-            .timestamp_monotonic()
-            .await
-            .ok()
-            .map(|usec| ago(std::time::Duration::from_micros(usec)))
-            .unwrap_or_else(|| "age unknown".to_owned());
+        let age = match session.timestamp().await {
+            Ok(usec) => session_age(usec, SystemTime::now()),
+            Err(_) => "age unknown".to_owned(),
+        };
         found.push(format!(
             "{id} ({user}, uid {uid}, {}, opened {age})",
             if service.is_empty() { &kind } else { &service }
@@ -262,4 +284,45 @@ pub async fn conflict_scan(bus: &zbus::Connection) -> Vec<String> {
 #[must_use]
 pub fn is_holding(state: FactState) -> bool {
     matches!(state, FactState::True | FactState::Indeterminate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An arbitrary but fixed "now", so the tests say nothing about the wall clock.
+    const NOW_SECS: u64 = 1_800_000_000;
+
+    fn now() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(NOW_SECS)
+    }
+
+    fn opened_secs_ago(secs: u64) -> u64 {
+        (NOW_SECS - secs) * 1_000_000
+    }
+
+    #[test]
+    fn a_session_age_is_elapsed_time_and_not_a_timestamp() {
+        assert_eq!(session_age(opened_secs_ago(0), now()), "0s ago");
+        assert_eq!(session_age(opened_secs_ago(120), now()), "2m ago");
+        // `ago` only reaches for hours past ninety minutes, so two hours is the shortest
+        // span that exercises the format the bug was reported in.
+        assert_eq!(session_age(opened_secs_ago(7200), now()), "2h00m ago");
+    }
+
+    /// The regression this function was extracted for. Two sessions opened a minute apart:
+    /// the newer one must read as the younger one. Handing logind's absolute timestamp to
+    /// `ago` inverted this, because the later session has the larger timestamp.
+    #[test]
+    fn a_newer_session_reads_younger_than_an_older_one() {
+        let older = session_age(opened_secs_ago(7260), now());
+        let newer = session_age(opened_secs_ago(7200), now());
+        assert_eq!((older.as_str(), newer.as_str()), ("2h01m ago", "2h00m ago"));
+    }
+
+    #[test]
+    fn a_session_stamped_in_the_future_is_not_rendered_as_an_age() {
+        let ahead = (NOW_SECS + 60) * 1_000_000;
+        assert_eq!(session_age(ahead, now()), "age unknown");
+    }
 }

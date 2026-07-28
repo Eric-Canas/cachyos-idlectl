@@ -101,6 +101,15 @@ pub struct Forced {
 /// disagreement has to survive two independent observations to be believed.
 const SCREEN_DIVERGENCE_GRACE: Duration = Duration::from_secs(60);
 
+/// How long an accepted transition may take to become an actual sleep before the daemon
+/// stops waiting for it.
+///
+/// Generous on purpose: a suspend runs every sleep hook on the machine first, and one slow
+/// hook is not a reason to fire a second request at logind. What this bounds is the other
+/// case — a transition that was accepted and then quietly abandoned, which without a
+/// timeout would leave the daemon believing forever that a sleep is on its way.
+const TRANSITION_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// The screen not being what the daemon asked for, and since when.
 ///
 /// [OBS-8] deliberately stops here: this records and reports, and nothing re-issues the
@@ -159,7 +168,20 @@ pub struct Engine {
 
     pub forced: Vec<Forced>,
     /// [ACT-2]: at most one power transition in flight at a time.
-    transition_in_flight: bool,
+    /// When a power transition was issued, while it has not yet come back.
+    ///
+    /// [ACT-2]. This used to be held only for the duration of the D-Bus call, and the
+    /// duration of that call is not the duration of the transition: logind returns as soon
+    /// as it has ACCEPTED the request, and the machine then takes seconds to go down while
+    /// sleep hooks run. The next evaluation landed inside that window, found the deadline
+    /// still passed, issued the same action again, and got `OperationInProgress` back — so
+    /// every ordinary suspend logged `the sleep mechanism refused`, which is the line that
+    /// is supposed to mean something is wrong. Measured on every suspend of a KDE machine.
+    ///
+    /// It is cleared when logind announces the resume, or after [`TRANSITION_TIMEOUT`] if
+    /// no sleep ever materialised — an accepted request that never became a suspend must
+    /// not wedge the daemon into never trying again.
+    transition_in_flight: Option<BootInstant>,
     pub dry_run: bool,
 
     /// Poked by anything that should cause a re-evaluation before the timer would.
@@ -197,7 +219,7 @@ impl Engine {
             screen_divergence: None,
             pending: None,
             forced: Vec::new(),
-            transition_in_flight: false,
+            transition_in_flight: None,
             dry_run,
             wake,
         })
@@ -364,14 +386,27 @@ impl Engine {
 
         let action = decision.action_to_perform()?;
 
-        if self.transition_in_flight {
-            // [ACT-2]. Not an error and not a retry: the previous transition is still
-            // being carried out and the machine will be re-evaluated when it comes back.
+        if let Some(issued) = self.transition_in_flight {
+            let waited = clock::now().since(issued);
+            if waited < TRANSITION_TIMEOUT {
+                // [ACT-2]. Not an error and not a retry: the previous transition is still
+                // being carried out and the machine will be re-evaluated when it comes
+                // back. Deliberately not a warning — on a healthy machine this is the
+                // ordinary state of affairs for the few seconds a suspend takes to land.
+                info!(
+                    ?action,
+                    "a power transition is already in flight; not issuing another"
+                );
+                return None;
+            }
+            // logind accepted a transition and the machine never went anywhere. Whatever
+            // swallowed it, refusing to try again forever is worse.
             warn!(
                 ?action,
-                "a power transition is already in flight; not issuing another"
+                waited_s = waited.as_secs(),
+                "a transition was accepted but no sleep followed; issuing again"
             );
-            return None;
+            self.transition_in_flight = None;
         }
 
         // [ACT-4]: between deciding that the deadline has passed and issuing the
@@ -407,12 +442,13 @@ impl Engine {
             return None;
         }
 
-        self.transition_in_flight = true;
+        self.transition_in_flight = Some(clock::now());
         let outcome = crate::actions::perform(&self.bus, confirmed).await;
-        self.transition_in_flight = false;
 
         match outcome {
             Ok(()) => {
+                // Left set on purpose. The machine has not gone down yet, and it is that
+                // gap that used to produce a second, refused attempt.
                 // The request has been honoured; there is nothing left to retry.
                 if self.pending.is_some_and(|p| p.action == confirmed) {
                     self.pending = None;
@@ -430,6 +466,8 @@ impl Engine {
                 Some(confirmed)
             }
             Err(err) => {
+                // Nothing is in flight: the mechanism said no.
+                self.transition_in_flight = None;
                 // [ACT-3]: logged at warning level, never silently ignored, never retried
                 // immediately. The next evaluation will decide again from scratch.
                 warn!(
@@ -440,6 +478,14 @@ impl Engine {
                 None
             }
         }
+    }
+
+    /// The transition that was in flight has landed: the machine is awake again.
+    ///
+    /// Called from the resume path rather than inferred, because the daemon cannot see the
+    /// gap it slept through from inside a tick.
+    pub fn note_transition_finished(&mut self) {
+        self.transition_in_flight = None;
     }
 
     /// Applies or releases `screen_off`.

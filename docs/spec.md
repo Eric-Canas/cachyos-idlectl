@@ -542,6 +542,14 @@ never closes and this fact becomes a permanent veto for the rest of the boot. Th
 diagnostic technique and an illegitimate way to leave something running; the lease (§5.3.4) is the
 correct mechanism for the latter.)*
 
+That age MUST be elapsed time, and it MUST be derived from a clock that does not stop while the
+machine is asleep. *(Measured: computed from logind's `TimestampMonotonic` — an absolute reading
+handed to an elapsed-duration formatter — every session on a machine with 14h37m of suspend behind
+it reported `opened 8h24m ago`, including one opened two minutes earlier, and the later of two
+sessions reported the larger figure. The whole purpose of this rule is that the age distinguishes a
+session-scope veto from a broken detector; rendered that way it made a healthy detector look
+broken.)*
+
 #### 5.3.4 `lease_held`
 
 **[FACT-13]** TRUE iff at least one unexpired lease exists. A lease is a record carrying an owner
@@ -946,6 +954,17 @@ here, and only the mechanical transition delegated.)*
 **[ACT-2]** The daemon MUST hold a single-transition guard. At most one power transition may be
 in flight at a time.
 
+A transition is in flight from the moment it is issued until the machine comes back, and NOT
+merely for the duration of the call that issues it. The guard MUST be released on the resume
+announcement, and MUST also be released after a bounded timeout so that a transition which was
+accepted and then abandoned cannot stop the daemon trying again. *(Measured: logind's `Suspend`
+returns as soon as it has accepted the request, while the machine takes seconds to go down running
+sleep hooks. Releasing the guard when the call returned put the next evaluation inside that window,
+where the deadline was still passed, so the same action was issued again and refused with
+`OperationInProgress` — on every single healthy suspend, which is precisely the log line [ACT-3]
+means to be read.)* Declining to issue inside the window is ordinary operation and MUST NOT be
+logged at warning level; releasing the guard on timeout MUST be.
+
 **[ACT-3]** A refusal from the system's sleep mechanism (for example, "an operation of this type
 is already in progress") MUST be logged at warning level. It MUST NOT be silently ignored, and it
 MUST NOT be retried immediately.
@@ -1042,6 +1061,16 @@ the daemon. Documentation that states the general rule MUST state this exception
 block setting a `screen_off` key MUST be listed by `doctor` as inert, and `doctor` MUST say which
 blocks those are ([OBS-3].12). An action reported as unavailable is knowledge, not doubt: it MUST
 NOT raise a doubt veto on anything, by [FACT-43] applied to actions.
+
+`doctor` MUST report the same availability for `suspend`, `hibernate` and `poweroff`, and MUST
+obtain it by asking the sleep mechanism rather than deriving it. *(Measured: on a machine whose only
+swap is zram and with no `resume=` on the kernel command line, logind answered `na` to
+`CanHibernate` and had known so since boot, while `doctor` said nothing at all and a forced
+hibernate failed with `SleepVerbNotSupported: Not enough suitable swap space`. logind already
+inspects the swap devices, the resume configuration and `/sys/power/state`; a second derivation here
+could only disagree with the mechanism that will actually run.)* An unavailable `hibernate` MUST NOT
+by itself make the report unhealthy — most machines cannot hibernate and that is not a fault — while
+an unavailable `suspend` or `poweroff` MUST.
 
 **[ACT-14]** A blank request MUST be written to the display server **by the thread that asks for
 it**, and MUST be flushed before the call returns. It MUST NOT be queued for delivery by a thread
@@ -1517,6 +1546,17 @@ shared exactly one property: nothing said anything was wrong.)*
 
 **[OBS-7]** Repeated identical fault records MUST be rate-limited to one per transition into the
 fault state, not one per evaluation.
+
+**[OBS-9] — a capability is watched for, not sampled once.** An agent MUST NOT decide its blanking
+capability solely from what the display server had advertised by the time it connected. It MUST
+install the mechanism whenever the protocol appears, MUST report the current answer on every
+heartbeat, and MUST tell the daemon when the answer changes. *(Measured: on a cold boot of a KDE
+session the agent started one second after the user manager, before KWin advertised
+`org_kde_kwin_dpms`. Nothing else was wrong — the agent registered, reported idle correctly, and
+declared `can_blank=false` — and the panel stayed lit for the whole session on a machine whose panel
+is an OLED television. The previous boot had won the same race, so three days of testing alongside
+another daemon never showed it.)* The same path covers a compositor restart, which takes its globals
+away and brings them back.
 
 **[OBS-8] — the screen is observed, and not corrected.** Where a session reports the power state
 of its outputs, the daemon MUST compare that report against the state it last asked for. A

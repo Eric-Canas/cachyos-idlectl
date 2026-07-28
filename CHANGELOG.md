@@ -15,6 +15,63 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.4.7] - 2026-07-28
+
+Four defects, all found by running a real machine on this daemon for the first time rather than
+alongside it. The first one is the one that matters.
+
+### Fixed
+
+- **A session that started before its compositor advertised a blanking protocol never blanked
+  again.** `idlectl-agent` decided its blanking capability once, during `connect`, from two Wayland
+  round trips. Measured on a cold boot of a KDE session: the agent started one second after the user
+  manager, KWin had not yet advertised `org_kde_kwin_dpms`, and everything else worked perfectly —
+  the agent registered, reported idle correctly, and told the daemon `can_blank=false`. The panel
+  then stayed lit for the entire session, on a machine whose panel is an OLED television. The
+  previous boot had won the same race, which is why three days of co-existence testing never showed
+  it.
+
+  The capability is no longer a value captured at start-up. The registry listener installs a blanker
+  whenever the protocol turns up, however late, `can_blank` is read on every report, and the agent
+  re-registers when the answer changes so the daemon learns. A compositor restart is covered by the
+  same path. `[OBS-9]`.
+
+- **Every ordinary suspend logged a warning about the sleep mechanism refusing.** The in-flight
+  guard of `[ACT-2]` was held for the duration of the D-Bus call, and that is not the duration of the
+  transition: logind returns as soon as it has *accepted* the request, while the machine takes
+  seconds to go down running sleep hooks. The next evaluation landed inside that window, found the
+  deadline still passed, issued the same action again, and got back:
+
+  ```
+  WARN the sleep mechanism refused action="suspend"
+       error="org.freedesktop.login1.OperationInProgress: Action suspend already in progress"
+  ```
+
+  A warning that fires on every healthy suspend is a warning nobody reads, and `[ACT-3]` means it to
+  be read. The guard now holds until logind announces the resume, or for two minutes if no sleep ever
+  materialises — an accepted transition that was quietly abandoned must not wedge the daemon into
+  never trying again.
+
+- **The age of a remote session was its timestamp, not its age.** logind's `TimestampMonotonic` was
+  handed straight to an elapsed-duration formatter, so every session reported the same figure —
+  uptime minus time spent suspended — and the *later* of two sessions reported the *larger* one. On a
+  machine with 14h37m of suspend behind it, a session opened two minutes earlier read as
+  `opened 8h24m ago`. `[FACT-10]` exists so that a session-scope veto is recognisable instead of
+  looking like a broken detector; printed that way it did the opposite. It now reads the realtime
+  `Timestamp`, and the property that the number must shrink as a session gets newer has a test.
+
+### Added
+
+- **`doctor` reports whether each action has a mechanism at all**, not just `screen_off`, by asking
+  logind rather than working it out. On a machine whose only swap is zram and which has no `resume=`
+  on its kernel command line, logind answers `na` to `CanHibernate` and knew so all along, while
+  `doctor` said nothing and a forced hibernate came back with `SleepVerbNotSupported: Not enough
+  suitable swap space`. Extends `[ACT-13]` to the three actions logind performs.
+
+  `hibernate` being unavailable does not make the report unhealthy: most machines cannot hibernate
+  and that is not a fault. `suspend` or `poweroff` being unavailable does — an idle daemon that
+  cannot rest the machine has nothing left to offer.
+
 ## [0.4.6] - 2026-07-28
 
 ### Fixed

@@ -144,8 +144,11 @@ struct Shared {
 }
 
 /// Which protocol the compositor gave us for turning outputs off.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum BlankVia {
+    /// The default, and it has to be: until a protocol has actually been seen, promising
+    /// the daemon a mechanism that may never arrive is the worse of the two errors.
+    #[default]
     None,
     /// `wlr-output-power-management-v1`: sway, Hyprland, wayfire, labwc.
     WlrOutputPower,
@@ -177,12 +180,32 @@ enum Blanker {
     KdeDpms(Vec<OrgKdeKwinDpms>),
 }
 
+/// The blanking capability, which is not necessarily available when the agent connects.
+///
+/// Shared between the backend and the event thread because it is decided CONTINUOUSLY
+/// rather than once. Measured on a cold boot of a KWin session: the agent started one
+/// second after the user manager, KWin had not yet advertised `org_kde_kwin_dpms`, and the
+/// two round trips in [`WaylandBackend::connect`] therefore found no blanking protocol.
+/// Everything else worked — the agent registered, reported idle correctly, and told the
+/// daemon `can_blank=false` — so the panel stayed lit for the whole session, on a machine
+/// whose panel is an OLED television. The previous boot had won the same race. Nothing
+/// retried, because the capability was a value captured during `connect`.
+///
+/// So the registry listener installs it whenever the protocol turns up, however late, and
+/// `can_blank` is read from here on every report instead of being captured at start-up.
+/// This also covers a compositor restart, which takes its globals with it and brings them
+/// back.
+#[derive(Default)]
+struct BlankState {
+    blanker: Option<Blanker>,
+    via: BlankVia,
+}
+
 pub struct WaylandBackend {
     shared: Arc<Mutex<Shared>>,
-    blank: Option<Blanker>,
+    blank: Arc<Mutex<BlankState>>,
     /// Kept so a request can be flushed on the thread that made it.
     connection: Connection,
-    via: BlankVia,
     compositor: String,
 }
 
@@ -220,6 +243,7 @@ impl WaylandBackend {
                 lost: false,
                 blanked: None,
             })),
+            blank: Arc::new(Mutex::new(BlankState::default())),
             seat: None,
             notifier: None,
             power_manager: None,
@@ -256,43 +280,18 @@ impl WaylandBackend {
             (),
         );
 
-        // wlroots first where both exist: it addresses outputs individually and says
-        // nothing about the rest of the session, while DPMS is a display-server-wide
-        // power state with a longer history of being fought over by other software.
-        let mut via = BlankVia::None;
-        if let Some(manager) = state.power_manager.clone()
-            && !state.outputs.is_empty()
-        {
-            for output in &state.outputs {
-                state
-                    .powers
-                    .push(manager.get_output_power(output, &handle, ()));
-            }
-            via = BlankVia::WlrOutputPower;
-        } else if let Some(manager) = state.dpms_manager.clone()
-            && !state.outputs.is_empty()
-        {
-            for output in &state.outputs {
-                state.dpms.push(manager.get(output, &handle, ()));
-            }
-            // One more roundtrip: `supported` is an event, and asking before it has
-            // arrived would report every KWin session as unable to blank.
-            let _ = queue.roundtrip(&mut state);
-            if state.dpms_supported {
-                via = BlankVia::KdeDpms;
-            }
-        }
+        // Build the per-output objects and install a blanker if the protocol is here
+        // already. If it is not, this is not the last chance: the registry listener arms
+        // it whenever the protocol turns up. See [`BlankState`] for the cold boot that
+        // made that necessary.
+        state.arm_blanking(&handle);
+        // One more roundtrip: KDE's `supported` is an event, and asking before it has
+        // arrived would report every KWin session as unable to blank.
+        let _ = queue.roundtrip(&mut state);
+        state.arm_blanking(&handle);
 
         let shared = Arc::clone(&state.shared);
-
-        // Cloned out before `state` moves into the thread. A cloned proxy is the same
-        // protocol object, so requests made through these reach the objects the compositor
-        // answered `supported` for.
-        let blanker = match via {
-            BlankVia::WlrOutputPower => Some(Blanker::WlrOutputPower(state.powers.clone())),
-            BlankVia::KdeDpms => Some(Blanker::KdeDpms(state.dpms.clone())),
-            BlankVia::None => None,
-        };
+        let blank = Arc::clone(&state.blank);
 
         // A dedicated thread rather than a future. The Wayland queue is a blocking,
         // synchronous API; driving it from the same reactor that owns the D-Bus socket
@@ -320,11 +319,73 @@ impl WaylandBackend {
 
         Ok(WaylandBackend {
             shared,
-            blank: blanker,
+            blank,
             connection,
-            via,
             compositor: std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "wayland".into()),
         })
+    }
+}
+
+impl State {
+    /// Creates the per-output protocol objects and installs a blanker, if one can be built
+    /// now and none is installed yet.
+    ///
+    /// Called from `connect` and again from every registry advertisement and every KDE
+    /// `supported` event, because any of the three things it needs — a manager, an output,
+    /// an answer to `supported` — can arrive after the agent has connected.
+    ///
+    /// Idempotent, and safe to call on every global: it does nothing until there is an
+    /// output to blank, it creates a protocol object only for outputs it has not seen, and
+    /// it never replaces a blanker that is already installed.
+    fn arm_blanking(&mut self, handle: &QueueHandle<Self>) {
+        if self.outputs.is_empty() {
+            return;
+        }
+
+        // wlroots first where both exist: it addresses outputs individually and says
+        // nothing about the rest of the session, while DPMS is a display-server-wide power
+        // state with a longer history of being fought over by other software.
+        if let Some(manager) = self.power_manager.clone() {
+            for i in self.powers.len()..self.outputs.len() {
+                let power = manager.get_output_power(&self.outputs[i], handle, ());
+                self.powers.push(power);
+            }
+            self.install(BlankVia::WlrOutputPower);
+            return;
+        }
+
+        if let Some(manager) = self.dpms_manager.clone() {
+            for i in self.dpms.len()..self.outputs.len() {
+                let object = manager.get(&self.outputs[i], handle, ());
+                self.dpms.push(object);
+            }
+            // KWin advertises the manager on every session, so having bound it proves
+            // nothing. Only an output answering `supported` does, and that answer is an
+            // event which may not have arrived yet.
+            if self.dpms_supported {
+                self.install(BlankVia::KdeDpms);
+            }
+        }
+    }
+
+    /// Publishes a blanker for the backend to issue requests through.
+    ///
+    /// A cloned proxy is the same protocol object, so requests made through these reach the
+    /// objects the compositor answered for.
+    fn install(&self, via: BlankVia) {
+        let Ok(mut blank) = self.blank.lock() else {
+            return;
+        };
+        if blank.blanker.is_some() {
+            return;
+        }
+        blank.blanker = Some(match via {
+            BlankVia::WlrOutputPower => Blanker::WlrOutputPower(self.powers.clone()),
+            BlankVia::KdeDpms => Blanker::KdeDpms(self.dpms.clone()),
+            BlankVia::None => return,
+        });
+        blank.via = via;
+        info!(via = via.name(), "a blanking protocol is available");
     }
 }
 
@@ -348,7 +409,11 @@ impl Backend for WaylandBackend {
     }
 
     fn set_blank(&self, blank: bool) -> Result<(), String> {
-        let Some(blanker) = &self.blank else {
+        let state = self
+            .blank
+            .lock()
+            .map_err(|_| "the blanking state cannot be read".to_owned())?;
+        let Some(blanker) = &state.blanker else {
             return Err("this session offers no blanking mechanism".to_owned());
         };
         match blanker {
@@ -392,7 +457,11 @@ impl Backend for WaylandBackend {
     }
 
     fn can_blank(&self) -> bool {
-        self.via != BlankVia::None
+        // Read on every report rather than captured at start-up, so that a protocol which
+        // arrived late is not invisible to the daemon for the rest of the session.
+        self.blank
+            .lock()
+            .is_ok_and(|state| state.via != BlankVia::None)
     }
 
     fn persist(&self) {
@@ -412,16 +481,20 @@ impl Backend for WaylandBackend {
     }
 
     fn describe(&self) -> String {
+        let via = self.blank.lock().map_or(BlankVia::None, |state| state.via);
         format!(
             "wayland ({}), ext-idle-notify-v1, {}",
             self.compositor,
-            self.via.name()
+            via.name()
         )
     }
 }
 
 struct State {
     shared: Arc<Mutex<Shared>>,
+    /// Shared with the backend: the event thread installs a blanker here whenever the
+    /// protocol appears, and the backend issues requests through it.
+    blank: Arc<Mutex<BlankState>>,
     seat: Option<wl_seat::WlSeat>,
     notifier: Option<ExtIdleNotifierV1>,
     power_manager: Option<ZwlrOutputPowerManagerV1>,
@@ -477,6 +550,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             }
             _ => {}
         }
+
+        // Any of the three things blanking needs can be advertised after `connect` has
+        // already looked, and on a cold boot one of them was. Re-arming here is what makes
+        // the capability something the agent keeps watching for rather than something it
+        // decided once — see [`BlankState`].
+        state.arm_blanking(handle);
     }
 }
 
@@ -513,7 +592,7 @@ impl Dispatch<OrgKdeKwinDpms, ()> for State {
         event: org_kde_kwin_dpms::Event,
         (): &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        handle: &QueueHandle<Self>,
     ) {
         match event {
             // `supported` is per output and it is the only honest answer to "can this
@@ -521,6 +600,9 @@ impl Dispatch<OrgKdeKwinDpms, ()> for State {
             // says nothing; an output saying `supported = 1` does.
             org_kde_kwin_dpms::Event::Supported { supported } if supported != 0 => {
                 state.dpms_supported = true;
+                // This may be the answer that completes the capability, and it arrives
+                // whenever KWin sends it rather than during `connect`.
+                state.arm_blanking(handle);
             }
             // What the panel is actually doing, straight from the compositor. `On` is the
             // only mode that leaves an image on it; standby and suspend are as dark as off
