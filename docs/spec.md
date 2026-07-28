@@ -1043,6 +1043,28 @@ block setting a `screen_off` key MUST be listed by `doctor` as inert, and `docto
 blocks those are ([OBS-3].12). An action reported as unavailable is knowledge, not doubt: it MUST
 NOT raise a doubt veto on anything, by [FACT-43] applied to actions.
 
+**[ACT-14]** A blank request MUST be written to the display server **by the thread that asks for
+it**, and MUST be flushed before the call returns. It MUST NOT be queued for delivery by a thread
+whose wakeup depends on the display server sending something first.
+
+The failure this excludes is not hypothetical and not visible to any test that does not involve a
+real compositor. The Wayland backend passed the request to its event thread over a channel; that
+thread blocks in `blocking_dispatch` waiting on the compositor, and a channel send does not wake
+it. A blank is only ever asked for on a **quiet** seat, which is precisely the state in which the
+compositor has nothing to say — so the request waited for an event that was not coming. Measured
+with `WAYLAND_DEBUG=1`: no `set` request on the wire across a 40-second blank, and a lit panel.
+
+**[ACT-15]** Where the display server reports the power state of an output, the agent's `Blanked`
+property MUST be taken from **that report** and not from the request it made. Where nothing is
+reported — X11 — it MAY fall back to the request, and the two cases MUST stay distinguishable
+inside the agent rather than being collapsed into a bare `bool`.
+
+This is [CLK-4] applied to the screen: an observation nobody made is the one claim the agent must
+not make, and it is not only about the seat. `Blanked` echoing the intent is what allowed
+[ACT-14]'s defect to report success for days — a `busctl` call that returned cleanly, a property
+that flipped to `true`, and a panel nobody had turned off. The rule is worth more than the
+property: **a mechanism that cannot fail loudly will fail silently.**
+
 ### 8.7 Privilege and state
 
 **[ACT-10]** The daemon runs privileged and reads state written by unprivileged callers (leases,
@@ -2151,6 +2173,7 @@ for removal, the measurement is the thing to re-run first.
 | [CLK-11], [TEST-23] | A settle window acting as an accelerator on a machine that has never slept. |
 | [ACT-7], [ACT-7b] | Powering off instead of suspending: every session closed, and a shutdown that hung one time in four. |
 | [ACT-12], [ACT-13] | An OLED carve-out resting on an action with no named mechanism and no unavailable story. |
+| [ACT-14], [ACT-15] | A blank request waiting on a wakeup that only a *busy* seat would deliver — and a `Blanked` property echoing the intent, so the panel that stayed lit reported success. |
 | [CFG-28] | A broken package leaving a panel lit, on a first start with no previous configuration to keep. |
 | [OBS-3].11 | Two owners of power, neither aware of the other (§13.3). |
 | [FACT-11] | `delay` locks read as vetoes, making the fact permanently true. |

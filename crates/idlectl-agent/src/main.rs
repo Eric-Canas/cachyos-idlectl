@@ -154,9 +154,14 @@ impl AgentInterface {
         Ok(())
     }
 
+    /// What the outputs are doing -- preferring what the display server reported over what
+    /// this agent asked for, and falling back to the request only where the display server
+    /// volunteers nothing (X11).
     #[zbus(property)]
     async fn blanked(&self) -> bool {
-        self.blanked.load(std::sync::atomic::Ordering::Relaxed)
+        self.backend
+            .observed_blank()
+            .unwrap_or_else(|| self.blanked.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     #[zbus(property)]

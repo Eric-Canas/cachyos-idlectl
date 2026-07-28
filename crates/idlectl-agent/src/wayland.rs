@@ -132,6 +132,15 @@ struct Shared {
     tracked: Tracked,
     /// Set when the connection dies. Everything after that is unknown, not idle.
     lost: bool,
+    /// The last power mode an output *reported*, which is not the last one this agent
+    /// asked for. `None` until some output says something.
+    ///
+    /// Kept apart from the request on purpose. For one release the `Blanked` property
+    /// echoed the intent instead, so a request that never reached the socket read back as
+    /// a panel that had been turned off -- and that is what hid the defect for days.
+    /// Reporting an observation nobody made is the one claim this agent must never make,
+    /// and it applies to the screen exactly as it applies to the seat.
+    blanked: Option<bool>,
 }
 
 /// Which protocol the compositor gave us for turning outputs off.
@@ -154,9 +163,25 @@ impl BlankVia {
     }
 }
 
+/// The protocol objects a blank request is issued on.
+///
+/// Held by the backend rather than by the event thread, so that the request is written by
+/// whichever thread asks for it. The previous design handed the request to the event thread
+/// over a channel, and the event thread spends its life parked in `blocking_dispatch`
+/// waiting for the *compositor* to speak: nothing in an mpsc send wakes that up. On a quiet
+/// seat -- which is the only state in which anything ever asks for a blank -- no event was
+/// due, so the request sat in the channel and the panel stayed lit. Measured with
+/// `WAYLAND_DEBUG=1`: the `set` request never appeared on the wire at all.
+enum Blanker {
+    WlrOutputPower(Vec<ZwlrOutputPowerV1>),
+    KdeDpms(Vec<OrgKdeKwinDpms>),
+}
+
 pub struct WaylandBackend {
     shared: Arc<Mutex<Shared>>,
-    blank: Option<std::sync::mpsc::Sender<bool>>,
+    blank: Option<Blanker>,
+    /// Kept so a request can be flushed on the thread that made it.
+    connection: Connection,
     via: BlankVia,
     compositor: String,
 }
@@ -193,6 +218,7 @@ impl WaylandBackend {
             shared: Arc::new(Mutex::new(Shared {
                 tracked: carried,
                 lost: false,
+                blanked: None,
             })),
             seat: None,
             notifier: None,
@@ -258,50 +284,27 @@ impl WaylandBackend {
         }
 
         let shared = Arc::clone(&state.shared);
-        let (blank_tx, blank_rx) = std::sync::mpsc::channel::<bool>();
-        let thread_via = via;
+
+        // Cloned out before `state` moves into the thread. A cloned proxy is the same
+        // protocol object, so requests made through these reach the objects the compositor
+        // answered `supported` for.
+        let blanker = match via {
+            BlankVia::WlrOutputPower => Some(Blanker::WlrOutputPower(state.powers.clone())),
+            BlankVia::KdeDpms => Some(Blanker::KdeDpms(state.dpms.clone())),
+            BlankVia::None => None,
+        };
 
         // A dedicated thread rather than a future. The Wayland queue is a blocking,
         // synchronous API; driving it from the same reactor that owns the D-Bus socket
         // would mean a compositor that stops reading its socket could stall the agent's
         // heartbeat, and a stalled heartbeat reads as a dead agent.
+        //
+        // It reads, and only reads. Requests are written by whoever makes them: see
+        // [`Blanker`] for the bug that came out of routing them through here.
         std::thread::Builder::new()
             .name("idlectl-wayland".to_owned())
             .spawn(move || {
                 loop {
-                    // Blanking requests arrive from the other thread and must be issued on
-                    // this one, because the protocol objects are not Send-safe to use
-                    // concurrently.
-                    while let Ok(blank) = blank_rx.try_recv() {
-                        match thread_via {
-                            BlankVia::WlrOutputPower => {
-                                let mode = if blank {
-                                    zwlr_output_power_v1::Mode::Off
-                                } else {
-                                    zwlr_output_power_v1::Mode::On
-                                };
-                                for power in &state.powers {
-                                    power.set_mode(mode);
-                                }
-                            }
-                            BlankVia::KdeDpms => {
-                                let mode = if blank {
-                                    org_kde_kwin_dpms::Mode::Off
-                                } else {
-                                    org_kde_kwin_dpms::Mode::On
-                                };
-                                for dpms in &state.dpms {
-                                    // The generated request takes a bare u32: this
-                                    // protocol predates the enum attribute the scanner
-                                    // uses to type such arguments.
-                                    dpms.set(mode.into());
-                                }
-                            }
-                            BlankVia::None => {}
-                        }
-                        let _ = connection.flush();
-                    }
-
                     if queue.blocking_dispatch(&mut state).is_err() {
                         // The compositor went away. Everything this agent knows about
                         // human presence is now unknown -- NOT idle, which would permit a
@@ -317,7 +320,8 @@ impl WaylandBackend {
 
         Ok(WaylandBackend {
             shared,
-            blank: (via != BlankVia::None).then_some(blank_tx),
+            blank: blanker,
+            connection,
             via,
             compositor: std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "wayland".into()),
         })
@@ -344,11 +348,47 @@ impl Backend for WaylandBackend {
     }
 
     fn set_blank(&self, blank: bool) -> Result<(), String> {
-        let Some(tx) = &self.blank else {
+        let Some(blanker) = &self.blank else {
             return Err("this session offers no blanking mechanism".to_owned());
         };
-        tx.send(blank)
-            .map_err(|_| "the Wayland thread has exited".to_owned())
+        match blanker {
+            Blanker::WlrOutputPower(powers) => {
+                let mode = if blank {
+                    zwlr_output_power_v1::Mode::Off
+                } else {
+                    zwlr_output_power_v1::Mode::On
+                };
+                for power in powers {
+                    power.set_mode(mode);
+                }
+            }
+            Blanker::KdeDpms(dpms) => {
+                let mode = if blank {
+                    org_kde_kwin_dpms::Mode::Off
+                } else {
+                    org_kde_kwin_dpms::Mode::On
+                };
+                for object in dpms {
+                    // The generated request takes a bare u32: this protocol predates the
+                    // enum attribute the scanner uses to type such arguments.
+                    object.set(mode.into());
+                }
+            }
+        }
+        // A request only exists once it is on the socket. Leaving it in the outgoing
+        // buffer for the event thread to flush is what made blanking depend on the
+        // compositor happening to send something first.
+        self.connection
+            .flush()
+            .map_err(|err| format!("cannot flush the Wayland connection: {err}"))
+    }
+
+    fn observed_blank(&self) -> Option<bool> {
+        let shared = self.shared.lock().ok()?;
+        if shared.lost {
+            return None;
+        }
+        shared.blanked
     }
 
     fn can_blank(&self) -> bool {
@@ -475,13 +515,40 @@ impl Dispatch<OrgKdeKwinDpms, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        // `supported` is per output and it is the only honest answer to "can this session
-        // blank". KWin advertises the manager unconditionally, so binding it says nothing;
-        // an output saying `supported = 1` does.
-        if let org_kde_kwin_dpms::Event::Supported { supported } = event
-            && supported != 0
+        match event {
+            // `supported` is per output and it is the only honest answer to "can this
+            // session blank". KWin advertises the manager unconditionally, so binding it
+            // says nothing; an output saying `supported = 1` does.
+            org_kde_kwin_dpms::Event::Supported { supported } if supported != 0 => {
+                state.dpms_supported = true;
+            }
+            // What the panel is actually doing, straight from the compositor. `On` is the
+            // only mode that leaves an image on it; standby and suspend are as dark as off
+            // and protect it just as well.
+            org_kde_kwin_dpms::Event::Mode { mode } => {
+                if let Ok(mut shared) = state.shared.lock() {
+                    shared.blanked = Some(mode != u32::from(org_kde_kwin_dpms::Mode::On));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwlrOutputPowerV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ZwlrOutputPowerV1,
+        event: zwlr_output_power_v1::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zwlr_output_power_v1::Event::Mode { mode } = event
+            && let Ok(mode) = mode.into_result()
+            && let Ok(mut shared) = state.shared.lock()
         {
-            state.dpms_supported = true;
+            shared.blanked = Some(mode == zwlr_output_power_v1::Mode::Off);
         }
     }
 }
@@ -492,7 +559,6 @@ delegate_noop!(State: ignore wl_seat::WlSeat);
 delegate_noop!(State: ignore wl_output::WlOutput);
 delegate_noop!(State: ExtIdleNotifierV1);
 delegate_noop!(State: ZwlrOutputPowerManagerV1);
-delegate_noop!(State: ignore ZwlrOutputPowerV1);
 delegate_noop!(State: OrgKdeKwinDpmsManager);
 
 #[cfg(test)]

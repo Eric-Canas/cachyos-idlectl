@@ -38,17 +38,19 @@ proposal wins, `never` beats everything, an action key a block does not set cont
 that action, and the default over zero true blocks is to do nothing. Order never matters, and there
 is no priority list to get wrong.
 
-> **Status: `0.4.1`, and working.** The daemon, the CLI and the session agent are implemented, and
+> **Status: `0.4.3`, and working.** The daemon, the CLI and the session agent are implemented, and
 > everything below has been exercised on a real CachyOS machine: the eleven facts, the decision
-> loop, leases, held requests, polkit authorization, the KDE and wlroots blanking backends, and
-> resume detection across a genuine `deep` suspend. Not yet on the AUR — until it is, build the
-> package from the PKGBUILD (see [Install](#install)) or run `packaging/install.sh`.
+> loop, leases, held requests, polkit authorization, resume detection across a genuine `deep`
+> suspend, and — since `0.4.3` — blanking on KWin, verified by watching the panel go dark rather
+> than by trusting the call to return. The wlroots backend is implemented and compiled but has not
+> been run against a wlroots compositor. Not yet on the AUR — until it is, build the package from
+> the PKGBUILD (see [Install](#install)) or run `packaging/install.sh`.
 >
 > It has spent days running in `--dry-run` beside the system it was extracted from, on the same
-> machine, with the two sets of decisions compared in the journal. That is where most of the bugs
-> fixed since `0.1.0` came from, and none of them were visible to the test suite: they only appear
-> once the shipped units are actually started. The [CHANGELOG](CHANGELOG.md) records what each one
-> was and how it was measured.
+> machine, with the two sets of decisions compared in the journal. That is where every bug fixed
+> since `0.1.0` came from, and none of them were visible to the test suite: they only appear once
+> the shipped units are actually started, and the last one was only visible to a human looking at
+> a television. The [CHANGELOG](CHANGELOG.md) records what each one was and how it was measured.
 
 ---
 

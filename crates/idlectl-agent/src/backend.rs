@@ -56,6 +56,22 @@ pub trait Backend: Send + Sync {
     /// doubt.
     fn can_blank(&self) -> bool;
 
+    /// Whether the display server says the outputs are dark, as opposed to whether this
+    /// agent asked for them to be.
+    ///
+    /// `None` means nothing has reported, which is not the same as "lit" and must not be
+    /// rendered as one. The default is `None` because most of this is protocol-specific:
+    /// only a backend whose display server volunteers the panel's power state can answer.
+    ///
+    /// It exists because the answer used to be taken from the request instead, and a
+    /// request that was never written to the socket therefore read back as a panel that
+    /// had been turned off. A silent no-op that reports success is worse than a loud
+    /// failure, and on an OLED it is the difference between protecting the panel and
+    /// believing you did.
+    fn observed_blank(&self) -> Option<bool> {
+        None
+    }
+
     /// What this backend is, for the journal and for `doctor`.
     fn describe(&self) -> String;
 

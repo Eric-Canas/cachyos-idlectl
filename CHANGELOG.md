@@ -15,6 +15,34 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.4.3] - 2026-07-28
+
+### Fixed
+
+- **Blanking now actually reaches the compositor.** The Wayland backend handed a blank request to
+  its event thread over an mpsc channel, and that thread spends its life parked in
+  `blocking_dispatch` waiting for the *compositor* to speak. Nothing in a channel send wakes that
+  up. So the request was only written the next time the compositor happened to send an unrelated
+  event — and on a quiet seat, which is the only state in which anything ever asks for a blank, no
+  event is due. Confirmed with `WAYLAND_DEBUG=1` on a KWin 6.7.3 session: across a 40-second blank
+  the `org_kde_kwin_dpms.set` request never appeared on the wire at all, and the panel stayed lit.
+
+  Requests are now issued and flushed on the thread that makes them, which is what
+  `wayland-client` supports and what removes the wakeup problem instead of working around it. The
+  event thread reads and only reads. Same trace after the fix: `-> org_kde_kwin_dpms@8.set(3)`
+  immediately, `<- mode, (3)` back from KWin, and a panel that goes dark.
+
+- **`Blanked` reports what the display server says, not what was asked for.** The property was set
+  from the request, so the bug above read back as a screen that had been successfully turned off.
+  It is now taken from the compositor's `mode` event (`org_kde_kwin_dpms` and
+  `zwlr_output_power_v1` both send one), falling back to the request only on X11, where nothing is
+  volunteered. `Backend::observed_blank` returns `Option<bool>` precisely so that "nothing has
+  reported" stays distinguishable from "lit".
+
+  This is the seat rule applied to the screen: an observation nobody made is the one claim this
+  agent must not make. Had it been applied here from the start, the defect above would have been
+  visible from the first `busctl` call rather than surviving days of co-existence testing.
+
 ## [0.4.2] - 2026-07-28
 
 ### Fixed
