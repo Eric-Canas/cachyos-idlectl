@@ -15,6 +15,67 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.5.0] - 2026-07-28
+
+A lease now names the process holding it. A minor release and not a patch, because the D-Bus
+interface changes — see the migration note under **Changed**.
+
+### Added
+
+- **`idlectl lease list` and `idlectl status` show the holder's pid** ([FACT-13b]). A lease is the
+  only thing that can hold a machine awake with nothing in the configuration to point at, and until
+  now the only identity it carried was a uid — which every process that user owns shares. Measured
+  need: a lease called `eval-flake` held a machine awake, and finding the process behind it took a
+  walk over `/proc/*/fd` and an `ss -xp` cross-reference of socket inodes.
+
+  The pid is a **diagnostic and never an identity**, so it is never shown bare. The daemon records
+  the holder's process start time beside the pid and re-checks both at the moment of reporting, which
+  turns the two dishonest answers into states:
+
+  | Shown | Meaning |
+  |---|---|
+  | `pid 3878 (idlectl)` | Still the process that took the lease. |
+  | `pid 3878 (gone)` | Exited, yet the lease stands — a child inherited the descriptor. |
+  | `pid 3878 (recycled)` | Live, but a **different** process now. Deliberately unnamed. |
+  | `pid unknown` | The bus did not answer for the caller's connection. |
+
+  `recycled` is not a hypothetical tidied away: authorization in this daemon is performed against a
+  bus name rather than a pid *precisely* because pids are recycled. A diagnostic can survive that
+  objection where a decision cannot, but only if it pays for it — an unqualified pid next to a held
+  lease reads as an instruction, and the obvious next step lands on a bystander.
+
+- **`idlectl status` says when the client and the daemon are different builds.** Installing the
+  package does not restart the daemon, and every answer on that screen comes from the process that is
+  *running*. Previously the only clue was output that did not match the release notes.
+
+### Changed
+
+- **`ListLeases` now returns `a(ssttuuss)`** — `(who, why, acquired_usec, expires_usec, uid,
+  holder_pid, holder_state, holder_comm)`. `holder_pid` is 0 when unknown, and `holder_state` is one
+  of `alive`, `gone`, `recycled`, `unknown`.
+
+  **Migration.** The CLI and the daemon ship in the same package, so a normal upgrade needs nothing —
+  but `pacman` does not restart the daemon, so until `systemctl restart idlepolicyd` runs, the new
+  `idlectl` is talking to the old interface. It says so on the first line of `status` and prints
+  `UNREADABLE` where the lease list would go, rather than an empty section: "nothing is holding this
+  machine awake" and "something might be and I cannot see it" are the two answers that command exists
+  to tell apart, and `unwrap_or_default()` rendered them identically. Third-party clients reading the
+  five-field tuple must widen it.
+
+- `idlectl lease list` and the `holding this machine awake` block of `idlectl status` gained a column.
+  `--json` gained `holder_pid`, `holder_state` and `holder_comm` as three separate fields, so a
+  caller that wants to act on the pid has to read the state and one that only prints it need not
+  parse a sentence.
+
+### Fixed
+
+- **The shipped D-Bus introspection XML declared `ListLeases` as `a(sttu)`** while the implementation
+  returned `a(ssttu)` — one `s` short, with a comment beside it correctly listing all five fields.
+  Anything generating bindings from that file, which is what a static introspection XML is *for*, got
+  a signature that could never decode a reply. Now `a(ssttuuss)`, and the preflight gate that parses
+  every tracked XML checks it parses but cannot check that it is true; only reading it against the
+  implementation does.
+
 ## [0.4.7] - 2026-07-28
 
 Four defects, all found by running a real machine on this daemon for the first time rather than

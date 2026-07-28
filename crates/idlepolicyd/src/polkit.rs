@@ -159,3 +159,20 @@ pub async fn caller_uid(bus: &zbus::Connection, sender: &str) -> Option<u32> {
     let name = zbus::names::BusName::try_from(sender.to_owned()).ok()?;
     proxy.get_connection_unix_user(name).await.ok()
 }
+
+/// The pid behind a unique bus name, straight from the bus daemon.
+///
+/// **For reporting, never for authorization.** [`check`] hands polkit a bus name precisely
+/// because a pid can be recycled between a call arriving and a check being made, and nothing
+/// here reopens that: this number is only ever shown to a human, next to the lease it took.
+///
+/// The objection is fatal for a decision and survivable for a report, but only if the report
+/// pays for it — so [`crate::leases::Holder`] stores this pid together with the process's
+/// start time and re-checks both before printing, and says "recycled" rather than naming
+/// whatever holds the number later. A pid without that pairing would be worse than no pid at
+/// all, because it looks equally authoritative when it is wrong.
+pub async fn caller_pid(bus: &zbus::Connection, sender: &str) -> Option<u32> {
+    let proxy = zbus::fdo::DBusProxy::new(bus).await.ok()?;
+    let name = zbus::names::BusName::try_from(sender.to_owned()).ok()?;
+    proxy.get_connection_unix_process_id(name).await.ok()
+}

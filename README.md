@@ -246,8 +246,18 @@ job that survives but hangs.
 
 ```console
 $ idlectl lease list
-backup                   uid 1000   expires in 1h59m       nightly backup
+backup                   uid 1000  pid 3878 (idlectl)     expires in 1h59m       nightly backup
 ```
+
+The pid answers *where to look* — a uid does not, because every process you own shares it. It is a
+diagnostic and never an identity, so it is always printed with what it currently means:
+
+| Shown | What it means |
+|---|---|
+| `pid 3878 (idlectl)` | That process took the lease and is still running. `ps --ppid 3878` finds the work it wrapped. |
+| `pid 3878 (gone)` | It has exited, yet the lease stands — so a child inherited the descriptor. The number is no longer somebody to talk to. |
+| `pid 3878 (recycled)` | That pid is live but belongs to a **different** process now. Deliberately unnamed: killing it would hit a bystander. |
+| `pid unknown` | The bus did not answer for the caller's connection. |
 
 Two things worth knowing before you hold one over SSH:
 

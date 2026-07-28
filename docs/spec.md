@@ -555,6 +555,32 @@ broken.)*
 **[FACT-13]** TRUE iff at least one unexpired lease exists. A lease is a record carrying an owner
 identifier, a human-readable reason, and an absolute expiry (TTL).
 
+**[FACT-13b] — a lease says who holds it, and says when that answer has stopped being true.**
+A lease record SHOULD carry the pid of the caller that took it, and MUST NOT present that pid as
+an identity. An implementation that reports one MUST record the holder's process start time beside
+it and MUST resolve, at the moment of reporting and not at the moment of acquiring, whether the pid
+still belongs to the process that took the lease. A pid whose process is gone MUST be reported as
+gone — the lease standing while its holder does not means the descriptor was inherited — and a pid
+that now belongs to a different process MUST be reported as recycled, and MUST NOT be labelled with
+the current occupant's name.
+
+Both halves are load-bearing, and they pull in opposite directions.
+
+*Reporting the pid* exists because a lease is the only thing that can hold a machine awake with
+nothing in the configuration to point at: [FACT-13]'s owner identifier says what the lease calls
+itself and its reason says what it is for, but neither says where the process is. *(Measured: a
+lease called `eval-flake` held a machine awake, and identifying the process behind it took a walk
+over `/proc/*/fd` followed by an `ss -xp` cross-reference of socket inodes, because the only
+identity on offer was a uid shared by every process that user owns.)*
+
+*Refusing to treat it as an identity* exists because a pid is not one, which this specification
+already relies on elsewhere: authorization is performed against a bus name precisely because a pid
+can be recycled between a call arriving and a check being made. A diagnostic may survive that
+objection where a decision may not — but only if it pays for it. An unqualified pid beside a held
+lease reads as an instruction, and the obvious next step, killing it, would land on a bystander.
+Hence the start time: it never changes while a process lives, so the pair names one process for the
+life of the boot, and the two dishonest answers become reportable states instead of confident text.
+
 **[FACT-14]** Leases MUST live in the same runtime location class as [CLK-9]: surviving
 suspend/resume, cleared by a cold boot.
 
@@ -2242,6 +2268,7 @@ for removal, the measurement is the thing to re-run first.
 | [OBS-8] | A screen state nobody ever reads back, on a daemon that by design does not re-issue an action it believes is already in effect. |
 | [CFG-28] | A broken package leaving a panel lit, on a first start with no previous configuration to keep. |
 | [OBS-3].11 | Two owners of power, neither aware of the other (§13.3). |
+| [FACT-13b] | A machine held awake by a lease that named no holder — and the bystander an unqualified pid would have pointed at. |
 | [FACT-11] | `delay` locks read as vetoes, making the fact permanently true. |
 | [FACT-12], §13.2 | An inhibitor design that cannot see a 150 GB download. |
 | [FACT-18] | A veto built on desktop inhibition APIs that report empty while an inhibit is held. |

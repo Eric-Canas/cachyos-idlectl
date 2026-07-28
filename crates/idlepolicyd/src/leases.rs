@@ -46,11 +46,114 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(3600);
 /// megabyte of text should get an error, not a log nobody can read.
 const MAX_TEXT: usize = 256;
 
+/// The caller that took a lease, for diagnosis and for nothing else.
+///
+/// [FACT-13b]. A lease is the one thing that can hold a machine awake with nothing in the
+/// configuration to point at, so `lease list` has to answer both halves of the question it
+/// exists for: `why` answers *what for*, and this answers *where to look*.
+///
+/// Measured need: a lease called `eval-flake` held a machine awake, and finding the process
+/// behind it took a walk over `/proc/*/fd` and an `ss -xp` cross-reference of socket inodes,
+/// because the only identity on offer was a uid that every process the user owns shares.
+///
+/// **Never used to authorize anything.** `polkit.rs` explains why a pid is not an identity;
+/// this type does not contradict it, it pays the price the objection names. The start time
+/// recorded beside the number is what lets a recycled pid be reported as recycled instead of
+/// shown to a human who is about to kill it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Holder {
+    pid: Option<u32>,
+    started: Option<u64>,
+}
+
+/// What a holder's pid means *now*, which is not always what it meant when it was recorded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HolderState {
+    /// The bus did not answer for the caller's connection. Reported as unknown rather than
+    /// as a zero, because a zero in a pid column reads as a real pid.
+    Unknown,
+    /// The process that took the lease is still running, and is called this.
+    Alive(String),
+    /// The process that took the lease is gone, yet the lease stands — so something else
+    /// holds the descriptor open, which means a child inherited it. Worth an eyebrow: the
+    /// lease has outlived the thing that asked for it.
+    Gone,
+    /// That pid is alive but is a *different* process. Says so instead of naming it.
+    Recycled,
+}
+
+impl HolderState {
+    /// The token that crosses the bus. Callers render it; the daemon decides it, because the
+    /// daemon is the side holding the recorded start time.
+    #[must_use]
+    pub fn wire(&self) -> &'static str {
+        match self {
+            HolderState::Unknown => "unknown",
+            HolderState::Alive(_) => "alive",
+            HolderState::Gone => "gone",
+            HolderState::Recycled => "recycled",
+        }
+    }
+
+    /// The process name, when there is a live process to name.
+    #[must_use]
+    pub fn comm(&self) -> &str {
+        match self {
+            HolderState::Alive(comm) => comm,
+            _ => "",
+        }
+    }
+}
+
+impl Holder {
+    /// Records a pid together with the start time that makes it meaningful later.
+    #[must_use]
+    pub fn of(pid: Option<u32>) -> Self {
+        Self {
+            pid,
+            started: pid.and_then(crate::proc::started_at),
+        }
+    }
+
+    #[must_use]
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// Re-reads `/proc` and says what this pid means now.
+    ///
+    /// Resolved at display time and never cached: the answer changes without anything
+    /// happening to the lease, which is the entire reason the distinction exists.
+    #[must_use]
+    pub fn state(&self) -> HolderState {
+        self.state_with(|pid| (crate::proc::started_at(pid), crate::proc::comm_of(pid)))
+    }
+
+    /// The decision, with `/proc` passed in so it can be tested without one.
+    fn state_with(&self, look: impl Fn(u32) -> (Option<u64>, Option<String>)) -> HolderState {
+        let Some(pid) = self.pid else {
+            return HolderState::Unknown;
+        };
+        let (started_now, comm) = look(pid);
+        match (self.started, started_now) {
+            // No process there at all. The lease is still held, so the descriptor went to
+            // a child; either way this number is no longer somebody to talk to.
+            (_, None) => HolderState::Gone,
+            (Some(recorded), Some(now)) if recorded != now => HolderState::Recycled,
+            // Including the case where the start time could not be read at acquire: a
+            // recycle cannot be *proven*, so it is not claimed.
+            _ => HolderState::Alive(comm.unwrap_or_default()),
+        }
+    }
+}
+
 /// One held lease.
 pub struct Lease {
     pub who: String,
     pub why: String,
     pub uid: u32,
+    /// The caller that asked for it. Diagnosis only — see [`Holder`].
+    pub holder: Holder,
     pub acquired: BootInstant,
     pub expires: BootInstant,
     /// The read end of the pipe whose write end the holder has. Readable-at-EOF means the
@@ -122,6 +225,7 @@ impl Table {
         who: &str,
         why: &str,
         uid: u32,
+        pid: Option<u32>,
         ttl: Duration,
         now: BootInstant,
     ) -> Result<(OwnedFd, OwnedFd), Refusal> {
@@ -162,6 +266,9 @@ impl Table {
                 who: who.to_owned(),
                 why: why.chars().take(MAX_TEXT).collect(),
                 uid,
+                // Read now, while the caller is certainly alive: after the reply is sent
+                // there is no moment at which this is still guaranteed.
+                holder: Holder::of(pid),
                 acquired: now,
                 // Saturating: an expiry that cannot be represented becomes the end of
                 // time, which the TTL bound above has already made unreachable.
@@ -274,7 +381,7 @@ mod tests {
     fn a_lease_is_released_when_its_handle_is_dropped() {
         let mut table = Table::default();
         let (handle, _watch) = table
-            .acquire("job", "building", 1000, Duration::from_secs(600), T0)
+            .acquire("job", "building", 1000, None, Duration::from_secs(600), T0)
             .expect("accepted");
         assert!(!table.is_empty());
         // Still held while the caller keeps the descriptor.
@@ -292,7 +399,7 @@ mod tests {
     fn a_lease_expires_on_its_ttl_even_with_the_handle_open() {
         let mut table = Table::default();
         let _handles = table
-            .acquire("job", "", 1000, Duration::from_secs(60), T0)
+            .acquire("job", "", 1000, None, Duration::from_secs(60), T0)
             .expect("accepted");
         assert!(table.reap(BootInstant::from_secs(1_059)).is_empty());
         let dropped = table.reap(BootInstant::from_secs(1_060));
@@ -304,18 +411,20 @@ mod tests {
     fn hostile_input_is_refused_rather_than_stored() {
         let mut table = Table::default();
         assert_eq!(
-            table.acquire("   ", "", 0, DEFAULT_TTL, T0).unwrap_err(),
+            table
+                .acquire("   ", "", 0, None, DEFAULT_TTL, T0)
+                .unwrap_err(),
             Refusal::EmptyId
         );
         assert_eq!(
             table
-                .acquire(&"x".repeat(MAX_TEXT + 1), "", 0, DEFAULT_TTL, T0)
+                .acquire(&"x".repeat(MAX_TEXT + 1), "", 0, None, DEFAULT_TTL, T0)
                 .unwrap_err(),
             Refusal::TooLong("who")
         );
         assert_eq!(
             table
-                .acquire("job", "", 0, Duration::from_secs(u32::MAX.into()), T0)
+                .acquire("job", "", 0, None, Duration::from_secs(u32::MAX.into()), T0)
                 .unwrap_err(),
             Refusal::TtlTooLong
         );
@@ -325,9 +434,13 @@ mod tests {
     #[test]
     fn a_duplicate_identifier_is_refused() {
         let mut table = Table::default();
-        let _a = table.acquire("job", "", 0, DEFAULT_TTL, T0).expect("first");
+        let _a = table
+            .acquire("job", "", 0, None, DEFAULT_TTL, T0)
+            .expect("first");
         assert_eq!(
-            table.acquire("job", "", 0, DEFAULT_TTL, T0).unwrap_err(),
+            table
+                .acquire("job", "", 0, None, DEFAULT_TTL, T0)
+                .unwrap_err(),
             Refusal::AlreadyHeld
         );
     }
@@ -335,16 +448,99 @@ mod tests {
     #[test]
     fn a_zero_ttl_takes_the_default_rather_than_expiring_instantly() {
         let mut table = Table::default();
-        let _h = table.acquire("job", "", 0, Duration::ZERO, T0).expect("ok");
+        let _h = table
+            .acquire("job", "", 0, None, Duration::ZERO, T0)
+            .expect("ok");
         assert!(table.reap(T0).is_empty());
         assert!(!table.reap(T0.checked_add(DEFAULT_TTL).unwrap()).is_empty());
+    }
+
+    /// A stand-in for `/proc`, so the four answers can be tested without four processes.
+    fn absent(_pid: u32) -> (Option<u64>, Option<String>) {
+        (None, None)
+    }
+
+    #[test]
+    fn a_lease_names_the_process_that_took_it() {
+        let mut table = Table::default();
+        let me = std::process::id();
+        let _h = table
+            .acquire("job", "", 1000, Some(me), DEFAULT_TTL, T0)
+            .expect("accepted");
+        let lease = table.iter().next().expect("one lease");
+        assert_eq!(lease.holder.pid(), Some(me));
+        let state = lease.holder.state();
+        assert_eq!(state.wire(), "alive");
+        assert!(
+            !state.comm().is_empty(),
+            "a live holder must be named, not merely counted"
+        );
+    }
+
+    #[test]
+    fn a_holder_without_a_pid_is_unknown_and_not_pid_zero() {
+        // The bus can decline to answer for a connection. Rendering that as `pid 0` would
+        // put a number in the column that a human could act on, and pid 0 is not a process.
+        let holder = Holder::of(None);
+        assert_eq!(holder.pid(), None);
+        assert_eq!(holder.state(), HolderState::Unknown);
+    }
+
+    #[test]
+    fn a_holder_whose_process_is_gone_says_so_rather_than_naming_it() {
+        // The lease outliving its holder is possible — a child that inherited the
+        // descriptor keeps it open — and it is exactly the case where the recorded pid
+        // stops meaning anything.
+        let holder = Holder {
+            pid: Some(4321),
+            started: Some(987_654),
+        };
+        assert_eq!(holder.state_with(absent), HolderState::Gone);
+    }
+
+    #[test]
+    fn a_recycled_pid_is_never_reported_as_the_holder() {
+        // The whole reason the start time is recorded. Without this branch `lease list`
+        // would print the name of an unrelated process next to the lease holding the
+        // machine awake, and the obvious next step -- kill it -- would hit a bystander.
+        let holder = Holder {
+            pid: Some(4321),
+            started: Some(987_654),
+        };
+        let recycled = |_pid: u32| (Some(999_999), Some("innocent".to_owned()));
+        assert_eq!(holder.state_with(recycled), HolderState::Recycled);
+        assert_eq!(holder.state_with(recycled).comm(), "");
+
+        // Same pid, same start time: this one really is the holder.
+        let same = |_pid: u32| (Some(987_654), Some("the-holder".to_owned()));
+        assert_eq!(
+            holder.state_with(same),
+            HolderState::Alive("the-holder".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_unreadable_start_time_at_acquire_does_not_become_a_recycle_claim() {
+        // Reading `/proc` can fail for reasons that are not "the process changed". A
+        // recycle that cannot be proven is not claimed: the pid is reported with the name
+        // it has now, which is the honest answer and the useful one.
+        let holder = Holder {
+            pid: Some(4321),
+            started: None,
+        };
+        let live = |_pid: u32| (Some(1), Some("something".to_owned()));
+        assert_eq!(holder.state_with(live).wire(), "alive");
     }
 
     #[test]
     fn the_summary_is_stable_across_calls() {
         let mut table = Table::default();
-        let _a = table.acquire("b-job", "two", 0, DEFAULT_TTL, T0).unwrap();
-        let _b = table.acquire("a-job", "one", 0, DEFAULT_TTL, T0).unwrap();
+        let _a = table
+            .acquire("b-job", "two", 0, None, DEFAULT_TTL, T0)
+            .unwrap();
+        let _b = table
+            .acquire("a-job", "one", 0, None, DEFAULT_TTL, T0)
+            .unwrap();
         assert_eq!(table.summary(), table.summary());
         assert_eq!(table.summary().unwrap(), "held by a-job (one), b-job (two)");
     }

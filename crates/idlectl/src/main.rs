@@ -92,7 +92,12 @@ trait Manager {
         ttl_usec: u64,
     ) -> zbus::Result<zbus::zvariant::OwnedFd>;
     fn release_lease(&self, who: &str) -> zbus::Result<bool>;
-    fn list_leases(&self) -> zbus::Result<Vec<(String, String, u64, u64, u32)>>;
+    /// `(who, why, acquired_usec, expires_usec, uid, holder_pid, holder_state, holder_comm)`.
+    /// `holder_pid` is 0 when unknown and means nothing without `holder_state` beside it —
+    /// see [`holder_label`].
+    fn list_leases(
+        &self,
+    ) -> zbus::Result<Vec<(String, String, u64, u64, u32, u32, String, String)>>;
     fn reload(&self) -> zbus::Result<Vec<String>>;
 
     #[zbus(property)]
@@ -399,13 +404,45 @@ fn human(d: std::time::Duration) -> String {
     }
 }
 
+/// How a lease's holder is shown: the pid, and what that pid means now.
+///
+/// The state is never dropped from the rendering. A bare `pid 4321` next to a held lease
+/// reads as an instruction, and for two of the four states following it would be wrong: the
+/// process may be gone, or the number may since have been handed to somebody else. The
+/// daemon decides which of the four it is — it is the side holding the recorded start time.
+fn holder_label(pid: u32, state: &str, comm: &str) -> String {
+    match state {
+        "alive" if comm.is_empty() => format!("pid {pid}"),
+        "alive" => format!("pid {pid} ({comm})"),
+        // Held, but not by the process that asked: a child inherited the descriptor.
+        "gone" => format!("pid {pid} (gone)"),
+        // Deliberately unnamed. Naming the current occupant of a recycled pid is how a
+        // bystander gets killed by somebody following a diagnostic.
+        "recycled" => format!("pid {pid} (recycled)"),
+        _ => "pid unknown".to_owned(),
+    }
+}
+
 async fn status(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::ExitCode> {
     if json {
         outln!("{}", manager.report().await?);
         return Ok(std::process::ExitCode::SUCCESS);
     }
 
-    outln!("idlepolicyd {}", manager.version().await?);
+    let daemon = manager.version().await?;
+    outln!("idlepolicyd {daemon}");
+    // Installing the package does not restart the daemon, so this pair can differ for as
+    // long as nobody reboots -- and everything below is answered by the process that is
+    // *running*, not by the binary on disk. Said once, here, because a reader comparing
+    // this screen against release notes has no other way to know which build produced it,
+    // and because while the version is 0.x the D-Bus interface may move between releases:
+    // a client that outran its daemon can lose whole sections of this output.
+    if daemon != env!("CARGO_PKG_VERSION") {
+        outln!(
+            "           (this client is {}; `systemctl restart idlepolicyd` to match)",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
     if manager.dry_run().await.unwrap_or(false) {
         outln!("MODE       dry run: decisions are logged and never applied");
     }
@@ -441,19 +478,33 @@ async fn status(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::
     // without appearing anywhere in the configuration, so `explain` -- which walks the
     // blocks -- cannot show them. Printed only when there is something to print: on an
     // idle machine this section does not exist, and `status` stays the short screen it is.
-    let leases = manager.list_leases().await.unwrap_or_default();
+    // Deliberately not `unwrap_or_default()`: an empty list and an unanswered call would
+    // render identically, and one of them says "nothing is holding this machine awake"
+    // while the other says "something might be and I cannot see it". Those are the two
+    // answers a person runs this command to tell apart.
+    let leases = match manager.list_leases().await {
+        Ok(leases) => leases,
+        Err(err) => {
+            outln!();
+            outln!("holding this machine awake");
+            outln!("  UNREADABLE: the daemon did not answer ListLeases ({err})");
+            outln!("  A lease may be held. Check `journalctl -u idlepolicyd -g lease`.");
+            Vec::new()
+        }
+    };
     let pending = manager.pending().await.unwrap_or_default();
     if !leases.is_empty() || !pending.is_empty() {
         outln!();
         outln!("holding this machine awake");
-        for (who, why, _acquired, expires, uid) in &leases {
+        for (who, why, _acquired, expires, uid, pid, state, comm) in &leases {
             let when = in_from_now(*expires).unwrap_or_else(|| "expired".to_owned());
             let reason = if why.is_empty() {
                 String::new()
             } else {
                 format!("  \u{2014} {why}")
             };
-            outln!("  lease    {who:<22} uid {uid:<6} {when}{reason}");
+            let holder = holder_label(*pid, state, comm);
+            outln!("  lease    {who:<22} uid {uid:<6} {holder:<20} {when}{reason}");
         }
         for (action, expires, uid) in &pending {
             let when = in_from_now(*expires).unwrap_or_else(|| "expiring".to_owned());
@@ -615,13 +666,19 @@ async fn lease(
             if output.json {
                 let rows: Vec<_> = leases
                     .iter()
-                    .map(|(who, why, acquired, expires, uid)| {
+                    .map(|(who, why, acquired, expires, uid, pid, state, comm)| {
                         serde_json::json!({
                             "who": who,
                             "why": why,
                             "acquired_usec": acquired,
                             "expires_usec": expires,
                             "uid": uid,
+                            // Three fields and not one string: a caller that wants to act
+                            // on the pid has to read the state, and a caller that wants to
+                            // print it should not have to parse a sentence.
+                            "holder_pid": pid,
+                            "holder_state": state,
+                            "holder_comm": comm,
                         })
                     })
                     .collect();
@@ -629,12 +686,13 @@ async fn lease(
             } else if leases.is_empty() {
                 outln!("no leases held");
             } else {
-                for (who, why, _acquired, expires, uid) in leases {
+                for (who, why, _acquired, expires, uid, pid, state, comm) in leases {
                     let when = in_from_now(expires).map_or_else(
                         || format!("expires at +{}s since boot", expires / 1_000_000),
                         |relative| format!("expires {relative}"),
                     );
-                    outln!("{who:<24} uid {uid:<6} {when:<22} {why}");
+                    let holder = holder_label(pid, &state, &comm);
+                    outln!("{who:<24} uid {uid:<6} {holder:<22} {when:<22} {why}");
                 }
             }
             Ok(std::process::ExitCode::SUCCESS)
@@ -782,6 +840,31 @@ fn default_layers() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_holder_is_never_rendered_as_a_bare_pid_when_the_pid_is_stale() {
+        assert_eq!(holder_label(3878, "alive", "idlectl"), "pid 3878 (idlectl)");
+        assert_eq!(holder_label(3878, "alive", ""), "pid 3878");
+        // The two states where following the number would be a mistake must carry the
+        // warning in the same string, because that string is the whole cell of the table.
+        assert_eq!(holder_label(3878, "gone", ""), "pid 3878 (gone)");
+        assert_eq!(holder_label(3878, "recycled", ""), "pid 3878 (recycled)");
+        // A recycled pid never names the process now at that number, even if the daemon
+        // were to send one.
+        assert_eq!(
+            holder_label(3878, "recycled", "innocent"),
+            "pid 3878 (recycled)"
+        );
+    }
+
+    #[test]
+    fn an_unknown_holder_shows_no_number_at_all() {
+        // Not "pid 0": in a pid column a zero reads as a pid, and no pid is 0.
+        assert_eq!(holder_label(0, "unknown", ""), "pid unknown");
+        // A state this client does not know about is treated the same way rather than
+        // rendered as fact -- the daemon may be newer than this binary.
+        assert_eq!(holder_label(7, "something-new", ""), "pid unknown");
+    }
 
     #[test]
     fn durations_round_down_rather_than_inventing_precision() {

@@ -282,11 +282,28 @@
     </method>
 
     <!--
-      Leases currently held, as (who, why, acquired_usec, expires_usec, uid).
+      Leases currently held, as
+      (who, why, acquired_usec, expires_usec, uid, holder_pid, holder_state, holder_comm).
       Not polkit-checked: seeing what is holding a machine awake is diagnosis.
+
+      holder_pid is the pid of the caller that took the lease, or 0 if the bus did not
+      answer for its connection. It is there to answer "where do I look?", and it is
+      NOT an identity: holder_state says what the number means right now and is one of
+
+        alive     : that pid is still the process that took the lease; holder_comm names it
+        gone      : that process has exited, yet the lease stands, so a child inherited
+                    the descriptor. The pid is no longer somebody to talk to.
+        recycled  : that pid is live but belongs to a DIFFERENT process now. holder_comm
+                    is empty on purpose, because naming the bystander would invite
+                    killing it.
+        unknown   : no pid was recorded; holder_pid is 0.
+
+      A client MUST NOT act on holder_pid without reading holder_state. The daemon
+      resolves the state on every call, because it holds the process start time the
+      answer depends on and a caller does not.
     -->
     <method name="ListLeases">
-      <arg name="leases" type="a(sttu)" direction="out"/>
+      <arg name="leases" type="a(ssttuuss)" direction="out"/>
     </method>
 
     <!--

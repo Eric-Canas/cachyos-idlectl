@@ -378,6 +378,9 @@ impl Manager {
         let uid = polkit::caller_uid(&self.bus, &sender)
             .await
             .unwrap_or(u32::MAX);
+        // Asked for while the caller is still on the bus. Diagnosis only: see
+        // `polkit::caller_pid` for why this is not, and must not become, an identity.
+        let pid = polkit::caller_pid(&self.bus, &sender).await;
 
         let ttl = std::time::Duration::from_micros(ttl_usec);
         let now = crate::clock::now();
@@ -385,11 +388,15 @@ impl Manager {
         let mut engine = self.engine.lock().await;
         let (fd, watch) = engine
             .leases
-            .acquire(who, why, uid, ttl, now)
+            .acquire(who, why, uid, pid, ttl, now)
             .map_err(|refusal| zbus::fdo::Error::InvalidArgs(refusal.to_string()))?;
         info!(
             lease = who,
             uid,
+            // Not `pid`: the journal already attaches `_PID`, which is this daemon's, and
+            // two fields called the same thing meaning different processes is how a log
+            // stops being evidence.
+            holder_pid = pid.unwrap_or(0),
             why,
             ttl_s = ttl.as_secs(),
             "lease acquired"
@@ -440,20 +447,29 @@ impl Manager {
         Ok(released)
     }
 
-    /// `(who, why, acquired_usec, expires_usec, uid)`. Not polkit-checked: seeing what is
-    /// holding a machine awake is diagnosis.
-    async fn list_leases(&self) -> Vec<(String, String, u64, u64, u32)> {
+    /// `(who, why, acquired_usec, expires_usec, uid, holder_pid, holder_state, holder_comm)`.
+    /// Not polkit-checked: seeing what is holding a machine awake is diagnosis.
+    ///
+    /// `holder_pid` is 0 when unknown, and `holder_state` is `alive`, `gone`, `recycled` or
+    /// `unknown` — resolved here, on every call, because the daemon is the only side holding
+    /// the start time the answer depends on ([FACT-13b]). A client MUST NOT treat the pid as
+    /// meaningful without the state beside it.
+    async fn list_leases(&self) -> Vec<(String, String, u64, u64, u32, u32, String, String)> {
         let engine = self.engine.lock().await;
         engine
             .leases
             .iter()
             .map(|l| {
+                let state = l.holder.state();
                 (
                     l.who.clone(),
                     l.why.clone(),
                     l.acquired.as_micros(),
                     l.expires.as_micros(),
                     l.uid,
+                    l.holder.pid().unwrap_or(0),
+                    state.wire().to_owned(),
+                    state.comm().to_owned(),
                 )
             })
             .collect()

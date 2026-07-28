@@ -105,6 +105,46 @@ fn parse_ppid(stat: &str) -> Option<u32> {
     rest.split_whitespace().nth(1)?.parse().ok()
 }
 
+/// The moment `pid` started, in clock ticks since boot, from `/proc/<pid>/stat`.
+///
+/// # Why this is recorded next to a pid, and not the pid alone
+///
+/// A pid is not an identity. The kernel hands them out monotonically and wraps at
+/// `pid_max`, so a number observed once can belong to a different process later — which is
+/// exactly why `polkit.rs` authorizes against a bus name and never against a pid. Field 22
+/// closes the gap for the cases where a pid is *reported* rather than trusted: it never
+/// changes while the process lives, so the pair `(pid, starttime)` names one process for
+/// the life of the boot. Anything that shows a human a pid they might act on has to carry
+/// it, so "the process that took this lease" and "whatever holds that number now" can be
+/// told apart before somebody kills the wrong one.
+#[must_use]
+pub fn started_at(pid: u32) -> Option<u64> {
+    parse_starttime(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// What a human calls the process at `pid`, or `None` if it is not there any more.
+///
+/// `comm` and not `cmdline`: this is used to label a pid in one column of a table, where
+/// the 15-byte truncation described above is a feature rather than the trap it is when
+/// matching.
+#[must_use]
+pub fn comm_of(pid: u32) -> Option<String> {
+    fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|s| s.trim_end().to_owned())
+}
+
+/// Extracts `starttime` — field 22 — from `/proc/<pid>/stat`.
+///
+/// Indexed from the last `)` for the same reason as [`parse_ppid`]: field 2 is the
+/// executable name, unescaped, and may contain spaces *and* parentheses. After that
+/// delimiter, field *n* sits at index *n - 3*, so field 22 is index 19.
+#[must_use]
+fn parse_starttime(stat: &str) -> Option<u64> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
 /// Whether any process has exactly this name.
 ///
 /// Matches `comm` **and** the basename of `argv[0]`, so it works for names of any length —
@@ -176,6 +216,40 @@ mod tests {
     #[test]
     fn ppid_of_a_normal_line() {
         assert_eq!(parse_ppid("1234 (bash) S 1 1234 1234 34816"), Some(1));
+    }
+
+    #[test]
+    fn starttime_is_field_22_counted_from_the_last_parenthesis() {
+        // Nineteen fields sit between the name and `starttime`, and miscounting them by
+        // one yields `itrealvalue` — which is 0 on every modern kernel, so the mistake
+        // would look like "this process has no start time" instead of like a wrong index.
+        let stat = "3878 (odd) name) S 3877 3878 3877 34816 3878 4194304 \
+                    100 0 200 0 5 6 0 0 20 0 3 0 987654 123456 789";
+        assert_eq!(parse_starttime(stat), Some(987_654));
+        // Same line, so the two parsers are known to agree about where the fields start.
+        assert_eq!(parse_ppid(stat), Some(3877));
+    }
+
+    #[test]
+    fn the_start_time_of_a_live_process_is_readable_and_does_not_move() {
+        let me = std::process::id();
+        let first = started_at(me).expect("/proc/self/stat is readable on any Linux");
+        assert_eq!(
+            started_at(me),
+            Some(first),
+            "a live process must never change its start time; the whole point of pairing \
+             it with a pid is that it cannot"
+        );
+        assert!(comm_of(me).is_some());
+    }
+
+    #[test]
+    fn a_pid_that_cannot_exist_reads_as_absent_rather_than_as_zero() {
+        // pid 0 is not a process on Linux and `/proc/0` never exists, so this is the one
+        // deterministic "gone" case available to a test — no spawning, no reaping, no
+        // window in which the answer could change.
+        assert_eq!(started_at(0), None);
+        assert_eq!(comm_of(0), None);
     }
 
     #[test]
