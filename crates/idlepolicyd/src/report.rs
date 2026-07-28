@@ -678,6 +678,13 @@ pub fn report_json(engine: &Engine) -> serde_json::Value {
             "uid": l.uid,
             "expires_usec": l.expires.as_micros(),
         })).collect::<Vec<_>>(),
+        // `null` rather than an omitted key: a consumer that does not find the field cannot
+        // tell "this daemon does not report held requests" from "there is no held request".
+        "pending": engine.pending.map(|p| json!({
+            "action": p.action.name(),
+            "uid": p.uid,
+            "expires_usec": p.expires_at.as_micros(),
+        })),
     })
 }
 

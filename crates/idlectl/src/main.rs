@@ -62,6 +62,8 @@ trait Manager {
     fn next_deadline_usec(&self) -> zbus::Result<u64>;
     #[zbus(property)]
     fn dry_run(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn pending(&self) -> zbus::Result<Vec<(String, u64, u32)>>;
 }
 
 #[derive(Debug, Parser)]
@@ -389,6 +391,33 @@ async fn status(manager: &ManagerProxy<'_>, json: bool) -> Result<std::process::
         };
         println!("  {name:<20} {when}");
     }
+
+    // Leases and held requests are the only two things that can keep this machine awake
+    // without appearing anywhere in the configuration, so `explain` -- which walks the
+    // blocks -- cannot show them. Printed only when there is something to print: on an
+    // idle machine this section does not exist, and `status` stays the short screen it is.
+    let leases = manager.list_leases().await.unwrap_or_default();
+    let pending = manager.pending().await.unwrap_or_default();
+    if !leases.is_empty() || !pending.is_empty() {
+        println!();
+        println!("holding this machine awake");
+        for (who, why, _acquired, expires, uid) in &leases {
+            let when = in_from_now(*expires).unwrap_or_else(|| "expired".to_owned());
+            let reason = if why.is_empty() {
+                String::new()
+            } else {
+                format!("  \u{2014} {why}")
+            };
+            println!("  lease    {who:<22} uid {uid:<6} {when}{reason}");
+        }
+        for (action, expires, uid) in &pending {
+            let when = in_from_now(*expires).unwrap_or_else(|| "expiring".to_owned());
+            println!(
+                "  request  {action:<22} uid {uid:<6} {when}  \u{2014} will happen when every veto clears"
+            );
+        }
+    }
+
     println!();
     println!(
         "Run `idlectl explain` for the whole computation, or `idlectl doctor` for what is broken."

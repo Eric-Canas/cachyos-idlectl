@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="idlectl">
+  <title>idlectl</title>
+  <!--
+    The IEC power symbol, with the vertical stroke through its gap replaced by a Z, and a
+    second smaller Z rising away from it. One shape, two readings: power, and sleep.
+
+    Geometry only: no text, no gradients, no filters. Three things are load-bearing and
+    should not be "tidied":
+      - the Z is narrow and tall. Widen it and the mark stops reading as a power symbol
+        and starts reading as a letter wearing a ring.
+      - the gap is 52 degrees, wider than a strict IEC glyph, so the Z's diagonal passes
+        through it with air on both sides instead of crowding the right-hand cap.
+      - stroke widths are uniform (12 for the mark, 6.5 for the small Z) with round caps
+        and joins, which is what keeps it from thinning out at small sizes.
+
+    For favicons and any use below ~24px, use icon.svg instead: the small Z is legible
+    here and becomes noise there.
+  -->
+  <g fill="none" stroke="#101418" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+    <!-- The broken circle: from the left edge of the gap, the long way round, to the right edge. -->
+    <path d="M 48.2 37.6 A 36 36 0 1 0 79.8 37.6" />
+    <!-- The Z crossing the gap, where the power symbol's stroke would be. -->
+    <path d="M 54 24 H 74 L 54 64 H 74" />
+  </g>
+  <g fill="none" stroke="#101418" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round">
+    <!-- The smaller Z, rising away. -->
+    <path d="M 89 12 H 101 L 89 28 H 101" />
+  </g>
+</svg>

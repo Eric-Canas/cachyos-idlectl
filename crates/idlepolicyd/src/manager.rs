@@ -117,6 +117,25 @@ impl Manager {
         self.engine.lock().await.dry_run
     }
 
+    /// The request being held, if there is one: `(action, expires_usec, uid)`.
+    ///
+    /// A list of zero or one rather than a tuple with a sentinel, because "no request" and
+    /// "a request for the action whose name happens to be empty" must not be the same wire
+    /// value. There is at most one held request by design ([REQ-6]).
+    ///
+    /// It exists so `status` can show it. A held request and a lease are the only two
+    /// things that keep a machine awake **without appearing anywhere in the
+    /// configuration**, so leaving them out of the first screen a person looks at is how
+    /// "why will this not sleep?" turns into a long afternoon.
+    #[zbus(property)]
+    async fn pending(&self) -> Vec<(String, u64, u32)> {
+        let engine = self.engine.lock().await;
+        engine
+            .pending
+            .map(|p| vec![(p.action.name().to_owned(), p.expires_at.as_micros(), p.uid)])
+            .unwrap_or_default()
+    }
+
     // --------------------------------------------------------------------- methods
 
     /// Human-readable explanation. Deliberately not polkit-checked: a diagnostic that

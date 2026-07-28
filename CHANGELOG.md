@@ -15,6 +15,43 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.4.5] - 2026-07-28
+
+### Added
+
+- **`status` now shows what is holding the machine awake.** A lease and a held request are the only
+  two things that can keep a machine awake **without appearing anywhere in the configuration**, so
+  `explain` — which walks the blocks — structurally cannot show them. Until now the answer to "why
+  will this not sleep?" was `lease_held true` with no indication of *who*, and a held request was
+  not mentioned at all. Both now appear on the first screen:
+
+  ```
+  holding this machine awake
+    lease    backup                 uid 1000   in 1h59m  — nightly backup
+    request  poweroff               uid 1000   in 5h59m  — will happen when every veto clears
+  ```
+
+  The section is printed only when there is something in it, so `status` on an idle machine is
+  exactly as short as it was.
+
+- **`Pending` property** on the manager interface, and `pending` in the JSON report. A list of zero
+  or one rather than a tuple with a sentinel, so "no request" and "a request for the action whose
+  name happens to be empty" are not the same wire value.
+
+- **A logo**, in [`docs/logo/`](docs/logo/): the IEC power symbol with the vertical stroke through
+  its gap replaced by a Z. `icon.svg` drops the second, smaller Z — it reads at 128px and becomes a
+  smudge at 16.
+
+### Changed
+
+- **The README is 477 lines instead of 793**, and answers "what is this, how do I install it, how do
+  I use it" before it argues about anything. It gained a `Usage` section with real command output,
+  which it did not have; the configuration reference, the fact-by-fact measurements, the security
+  model and the design rationale moved to [`docs/`](docs/) intact. Nothing was deleted.
+
+- `Install` leads with `paru -S idlectl` and explains why `pacman` cannot fetch it on its own,
+  instead of assuming the reader knows what an AUR helper is for.
+
 ## [0.4.4] - 2026-07-28
 
 ### Added

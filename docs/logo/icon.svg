@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="idlectl">
+  <title>idlectl</title>
+  <!--
+    logo.svg without the small rising Z, and re-centred on the square.
+    For favicons, tray icons and anything below ~24px, where the second Z stops being a
+    second Z and becomes a smudge next to the first one.
+  -->
+  <g fill="none" stroke="#101418" stroke-width="13" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 48.2 41.6 A 36 36 0 1 0 79.8 41.6" />
+    <path d="M 54 28 H 74 L 54 68 H 74" />
+  </g>
+</svg>
