@@ -15,6 +15,22 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.5.1] - 2026-07-28
+
+### Fixed
+
+- **A client that has outrun its daemon now says what to do about it.** Verifying 0.5.0's own
+  migration path produced this, from `idlectl lease list` immediately after the upgrade:
+
+  ```
+  idlectl: Signature mismatch: got `a(ssttu)`, expected `a(ssttuuss)`
+  ```
+
+  Which is diagnosable and not actionable — and `lease list` is precisely the command someone
+  runs to find out what is holding a machine awake. It now appends the cause and the remedy:
+  the daemon's version, this client's, and `systemctl restart idlepolicyd`. `status` already
+  said it on its first line; this is the same fact where the other command fails.
+
 ## [0.5.0] - 2026-07-28
 
 A lease now names the process holding it. A minor release and not a patch, because the D-Bus

@@ -404,6 +404,24 @@ fn human(d: std::time::Duration) -> String {
     }
 }
 
+/// Turns a failed call into an error that names the likeliest cause of it.
+///
+/// While the version is `0.x` the D-Bus interface may move between releases, and installing
+/// the package does not restart the daemon — so the first thing a person meets after an
+/// upgrade is a client talking to the old interface. zbus reports that as
+/// `Signature mismatch: got a(ssttu), expected a(ssttuuss)`, which is diagnosable and not
+/// actionable. Measured on the upgrade to 0.5.0, which is why this exists.
+async fn with_version_hint(manager: &ManagerProxy<'_>, err: zbus::Error) -> anyhow::Error {
+    match manager.version().await {
+        Ok(daemon) if daemon != env!("CARGO_PKG_VERSION") => anyhow::anyhow!(
+            "{err}\n\nThe running daemon is {daemon} and this client is {}. Installing the \
+             package does not restart it: `systemctl restart idlepolicyd`.",
+            env!("CARGO_PKG_VERSION")
+        ),
+        _ => anyhow::Error::new(err),
+    }
+}
+
 /// How a lease's holder is shown: the pid, and what that pid means now.
 ///
 /// The state is never dropped from the rendering. A bare `pid 4321` next to a held lease
@@ -662,7 +680,10 @@ async fn lease(
             }
         }
         LeaseCommand::List(output) => {
-            let leases = manager.list_leases().await?;
+            let leases = match manager.list_leases().await {
+                Ok(leases) => leases,
+                Err(err) => return Err(with_version_hint(manager, err).await),
+            };
             if output.json {
                 let rows: Vec<_> = leases
                     .iter()
