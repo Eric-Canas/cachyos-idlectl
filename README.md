@@ -471,6 +471,23 @@ an ordinary fact.
 `after_resume` stays true from the first resume until the next cold boot; it does not expire when
 the settle window does. Pair it with `clock = "resume"` and it *is* the settle window.
 
+`local_service_busy` is the one fact that ships **off**, because there is no sensible default for
+where to read counters from. Turning it on takes **both** keys, in a later layer — merging is per
+key, so the URL alone leaves the shipped `enabled = false` standing and the fact silently stays off:
+
+```toml
+[facts.local_service_busy]
+enabled      = true
+counters_url = "http://127.0.0.1:8080/metrics"
+idle_window  = "30m"
+```
+
+It asks whether a service has *served something recently*, not whether its unit is running: a model
+server left up "just in case" is not a model server in use, and treating the unit's state as the
+signal is what turns one start-up decision into a machine that never sleeps again. A refused
+connection reads FALSE — nothing is listening, so nothing is being served — while a service that is
+up and will not answer reads `indeterminate`, which vetoes.
+
 `gpu_busy_game` and `gpu_busy_other` are split because they want different policy. Attribution is by
 process ancestry — never by an executable allowlist — so a game keeps a soft, finite floor while
 unattributed GPU load keeps its own. The compositor is excluded by name, not merely by falling under
