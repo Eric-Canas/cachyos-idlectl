@@ -1518,6 +1518,31 @@ shared exactly one property: nothing said anything was wrong.)*
 **[OBS-7]** Repeated identical fault records MUST be rate-limited to one per transition into the
 fault state, not one per evaluation.
 
+**[OBS-8] — the screen is observed, and not corrected.** Where a session reports the power state
+of its outputs, the daemon MUST compare that report against the state it last asked for. A
+disagreement that survives a grace of at least two agent heartbeats MUST produce one log record
+and MUST appear in `doctor`. The daemon MUST NOT re-issue the action on the strength of that
+disagreement.
+
+Both halves are load-bearing.
+
+*Observing* exists because the daemon's record of the screen is an **intent**, written when it
+asked and never read back, and because it does not re-issue an action it believes is already in
+effect ([ACT-7]). Every way a blank can fail to take — a compositor that ignores it, another
+program turning the panel back on, a compositor restart that leaves the protocol object dead, an
+output replaced by a hotplug — therefore ends in a lit panel that nothing reports and nothing
+retries. That is precisely the class of fault that [ACT-14] turned out to be, and it survived
+three days of side-by-side comparison because nothing was looking.
+
+*Not correcting* is not timidity, it is a measured trade. Input turns the panel back on before
+`resumed` has been delivered, so between the two there is a window in which the daemon still
+believes the screen should be dark and the observation says it is lit. A daemon that corrected on
+sight would blank the screen in the face of somebody who has just picked up the controller. That
+failure is worse, more visible and more frequent than the one it fixes, and it lands on the use
+case with the highest priority. Any future correction MUST be guarded on a fact that closes that
+window, and MUST be justified by divergences this clause actually recorded — not by the
+possibility of them.
+
 ---
 
 ## 12. Worked examples
@@ -2174,6 +2199,7 @@ for removal, the measurement is the thing to re-run first.
 | [ACT-7], [ACT-7b] | Powering off instead of suspending: every session closed, and a shutdown that hung one time in four. |
 | [ACT-12], [ACT-13] | An OLED carve-out resting on an action with no named mechanism and no unavailable story. |
 | [ACT-14], [ACT-15] | A blank request waiting on a wakeup that only a *busy* seat would deliver — and a `Blanked` property echoing the intent, so the panel that stayed lit reported success. |
+| [OBS-8] | A screen state nobody ever reads back, on a daemon that by design does not re-issue an action it believes is already in effect. |
 | [CFG-28] | A broken package leaving a panel lit, on a first start with no previous configuration to keep. |
 | [OBS-3].11 | Two owners of power, neither aware of the other (§13.3). |
 | [FACT-11] | `delay` locks read as vetoes, making the fact permanently true. |

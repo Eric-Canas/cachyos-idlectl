@@ -15,6 +15,29 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.4.4] - 2026-07-28
+
+### Added
+
+- **The daemon now reads the screen back, and says so when it disagrees** ([OBS-8]). Its record of
+  the screen state was an intent — written when it asked for a change, never read back — and by
+  [ACT-7] it does not re-issue an action it believes is already in effect. Every way a blank can
+  fail to take therefore ended in a lit panel that nothing reported and nothing retried: a
+  compositor that ignores the request, another program turning the panel back on, a compositor
+  restart that leaves the protocol object dead, an output replaced by a hotplug. That is exactly
+  the shape of the `0.4.3` defect, and it survived three days of side-by-side comparison because
+  nothing was looking.
+
+  Each evaluation now compares what was asked for against the sessions' `Blanked` property, which
+  since `0.4.3` is written by the display server. A disagreement that survives 60 seconds — two
+  agent heartbeats — produces one log record and a `DIVERGED` line in `doctor`.
+
+  **It does not correct.** Input turns the panel back on before `resumed` has been delivered, so a
+  daemon that re-issued on sight would blank the screen in the face of somebody who had just
+  picked up the controller: a worse, more visible and more frequent failure than the one it fixes,
+  landing on the highest-priority use case. Whether correcting is worth it is a question for
+  evidence, and this is the change that produces the evidence.
+
 ## [0.4.3] - 2026-07-28
 
 ### Fixed

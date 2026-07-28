@@ -484,6 +484,34 @@ pub async fn doctor(engine: &Engine) -> (String, bool) {
         }
     );
 
+    // 13. [OBS-8]: the screen the display server reports, against the one this daemon
+    // asked for. Not a fault -- the daemon is working as designed and is deliberately not
+    // correcting this -- but the only place a panel that quietly stayed lit becomes
+    // visible without somebody happening to look at it.
+    if let Some(divergence) = engine.screen_divergence
+        && divergence.settled(now)
+    {
+        healthy = false;
+        let _ = writeln!(
+            out,
+            "  DIVERGED  the screen has disagreed with this daemon for {}",
+            human(now.since(divergence.since))
+        );
+        let _ = writeln!(
+            out,
+            "            the daemon asked for blank={} and the display server reports otherwise.",
+            engine.agents.blanked()
+        );
+        let _ = writeln!(
+            out,
+            "            Nothing is being re-issued: see [OBS-8]. If this is frequent, that"
+        );
+        let _ = writeln!(
+            out,
+            "            is the evidence for deciding whether it should be corrected."
+        );
+    }
+
     // 4. Every ceiling, as a standing hazard. A ceiling is the only construct that can act
     // against a floor, so its mere existence is worth reporting whether or not it is true
     // right now.

@@ -115,3 +115,70 @@ pub async fn set_blank(
 
     (done, failed)
 }
+
+/// What the sessions say their screens are **actually** doing.
+///
+/// The daemon has always kept its own record of the screen state, written when it asked
+/// for a change and never read back. That record is an intent, and an intent is not an
+/// observation: every reason a blank might not take effect -- a compositor that ignores
+/// the request, another program turning the panel back on, a compositor restart that
+/// leaves the protocol object dead, an output replaced by a hotplug -- ends in a lit panel
+/// that nothing reports. On an OLED that is the failure the action exists to prevent.
+///
+/// This reads the agent's `Blanked` property, which since agent 0.4.3 is written by the
+/// display server rather than by the agent's own request ([ACT-15]). It only *reports*:
+/// nothing here re-issues anything. See [OBS-8] for why observing came before correcting.
+#[derive(Debug, Default)]
+pub struct ScreenReport {
+    /// Sessions whose display server says the outputs are dark.
+    pub blanked: Vec<String>,
+    /// Sessions whose display server says the outputs are lit.
+    pub lit: Vec<String>,
+    /// Sessions that offer a mechanism but could not be asked. Not counted as either
+    /// state: an agent that cannot be reached has observed nothing, and treating silence
+    /// as "lit" would raise a false divergence every time one restarts.
+    pub unreachable: Vec<String>,
+}
+
+impl ScreenReport {
+    /// The sessions that disagree with `want`, which is what the daemon last asked for.
+    pub fn disagreeing(&self, want: bool) -> &[String] {
+        if want { &self.lit } else { &self.blanked }
+    }
+}
+
+pub async fn observe_blank(bus: &zbus::Connection, registry: &Registry) -> ScreenReport {
+    let mut report = ScreenReport::default();
+
+    for (unique_name, agent) in registry.iter() {
+        if !agent.can_blank {
+            continue;
+        }
+        let proxy = match AgentProxy::builder(bus).destination(unique_name.clone()) {
+            Ok(builder) => match builder.build().await {
+                Ok(p) => p,
+                Err(err) => {
+                    report
+                        .unreachable
+                        .push(format!("{}: {err}", agent.session_id));
+                    continue;
+                }
+            },
+            Err(err) => {
+                report
+                    .unreachable
+                    .push(format!("{}: {err}", agent.session_id));
+                continue;
+            }
+        };
+        match proxy.blanked().await {
+            Ok(true) => report.blanked.push(agent.session_id.clone()),
+            Ok(false) => report.lit.push(agent.session_id.clone()),
+            Err(err) => report
+                .unreachable
+                .push(format!("{}: {err}", agent.session_id)),
+        }
+    }
+
+    report
+}

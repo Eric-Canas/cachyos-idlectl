@@ -38,7 +38,7 @@ proposal wins, `never` beats everything, an action key a block does not set cont
 that action, and the default over zero true blocks is to do nothing. Order never matters, and there
 is no priority list to get wrong.
 
-> **Status: `0.4.3`, and working.** The daemon, the CLI and the session agent are implemented, and
+> **Status: `0.4.4`, and working.** The daemon, the CLI and the session agent are implemented, and
 > everything below has been exercised on a real CachyOS machine: the eleven facts, the decision
 > loop, leases, held requests, polkit authorization, resume detection across a genuine `deep`
 > suspend, and — since `0.4.3` — blanking on KWin, verified by watching the panel go dark rather

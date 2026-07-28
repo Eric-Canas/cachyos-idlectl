@@ -93,6 +93,39 @@ pub struct Forced {
 }
 
 /// Everything the daemon knows.
+/// How long the screen may disagree with the daemon before that is worth saying.
+///
+/// A blank is not instantaneous: the request goes to the display server and the state
+/// comes back in a later event. A grace shorter than that round trip would report a
+/// divergence on every single change. Sixty seconds is two agent heartbeats, so a
+/// disagreement has to survive two independent observations to be believed.
+const SCREEN_DIVERGENCE_GRACE: Duration = Duration::from_secs(60);
+
+/// The screen not being what the daemon asked for, and since when.
+///
+/// [OBS-8] deliberately stops here: this records and reports, and nothing re-issues the
+/// blank. Correcting it automatically has a race that costs more than the fault does --
+/// input turns the panel back on before `resumed` has been delivered, so a daemon that
+/// corrected on sight would blank the screen in the face of somebody who had just picked
+/// up the controller. That is a worse failure than the one it fixes, and this machine's
+/// first priority is being a console. Whether to correct at all is a question for data
+/// this field is here to produce.
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenDivergence {
+    /// The first observation that disagreed.
+    pub since: BootInstant,
+    /// Whether the grace has already been announced, so the journal gets one record and
+    /// not one per evaluation.
+    warned: bool,
+}
+
+impl ScreenDivergence {
+    /// Whether this has lasted long enough to be worth believing.
+    pub fn settled(&self, now: BootInstant) -> bool {
+        now.since(self.since) >= SCREEN_DIVERGENCE_GRACE
+    }
+}
+
 pub struct Engine {
     pub sources: Sources,
     pub policy: Policy,
@@ -115,6 +148,10 @@ pub struct Engine {
     pub clocks: ClockSnapshot,
     pub last_eval: Option<BootInstant>,
     pub screen_off_available: bool,
+
+    /// [OBS-8]: when the screen the display server reports stopped matching the one the
+    /// daemon asked for, if it still does not match. `None` means they agree.
+    pub screen_divergence: Option<ScreenDivergence>,
 
     /// A request accepted but not yet carried out, retried on every evaluation until it
     /// fires, expires, or a human arrives -- [REQ-6]. In memory on purpose; see `pending`.
@@ -157,6 +194,7 @@ impl Engine {
             clocks: ClockSnapshot::at(now),
             last_eval: None,
             screen_off_available: false,
+            screen_divergence: None,
             pending: None,
             forced: Vec::new(),
             transition_in_flight: false,
@@ -322,6 +360,7 @@ impl Engine {
         // about `suspend`, and `suspend` being vetoed does not veto `screen_off`. The two
         // halves below therefore do not talk to each other.
         self.apply_screen(&decision).await;
+        self.observe_screen().await;
 
         let action = decision.action_to_perform()?;
 
@@ -445,6 +484,57 @@ impl Engine {
                 "screen state changed"
             );
             self.agents.set_blanked(due);
+        }
+    }
+
+    /// Compares the screen the daemon asked for against the one the display server reports.
+    ///
+    /// [OBS-8]. Observes and says so; never corrects. Runs after [`Self::apply_screen`] so
+    /// that a change made on this same evaluation is the one being checked.
+    async fn observe_screen(&mut self) {
+        if !self.screen_off_available {
+            self.screen_divergence = None;
+            return;
+        }
+
+        // In dry run the daemon never issues a blank, so its record stays `false` and a lit
+        // panel agrees with it. That is honest rather than convenient: this check produces
+        // no evidence until the daemon actually owns the screen, and saying so is better
+        // than manufacturing agreement.
+        let want = self.agents.blanked();
+        let report = crate::actions::observe_blank(&self.bus, &self.agents).await;
+        let disagreeing = report.disagreeing(want);
+
+        if disagreeing.is_empty() {
+            if let Some(previous) = self.screen_divergence.take()
+                && previous.warned
+            {
+                info!(
+                    blank = want,
+                    for_ = %crate::report::human(clock::now().since(previous.since)),
+                    "the screen agrees with the daemon again"
+                );
+            }
+            return;
+        }
+
+        let now = clock::now();
+        let divergence = self.screen_divergence.get_or_insert(ScreenDivergence {
+            since: now,
+            warned: false,
+        });
+
+        if divergence.settled(now) && !divergence.warned {
+            divergence.warned = true;
+            // Warning, not error: nothing here is broken from the daemon's side, and the
+            // daemon is not going to act on it. It is the one record that turns a silently
+            // lit panel into something a person can find afterwards.
+            warn!(
+                asked_for = want,
+                sessions = disagreeing.join(", "),
+                for_ = %crate::report::human(now.since(divergence.since)),
+                "the screen is not what this daemon asked for, and it is not being corrected"
+            );
         }
     }
 
