@@ -47,20 +47,6 @@ nothing.
 
 **Order never matters, and there is no priority list to get wrong.**
 
-> **Status: `0.4.6`, and working.** The daemon, the CLI and the session agent are implemented, and
-> everything below has been exercised on a real CachyOS machine: the eleven facts, the decision
-> loop, leases, held requests, polkit authorization, resume detection across a genuine `deep`
-> suspend, and blanking on KWin — verified by watching the panel go dark, not by trusting the call
-> to return. The wlroots blanking backend is implemented and compiles but has not been run against
-> a wlroots compositor.
->
-> It has spent days running in `--dry-run` beside the hand-written system it was extracted from, on
-> the same machine, with both sets of decisions compared in the journal. That is where every bug
-> fixed since `0.1.0` came from, and **none of them were visible to the test suite**: they only
-> appear once the shipped units are actually started, and the last one was only visible to a human
-> looking at a television. The [CHANGELOG](CHANGELOG.md) records what each one was and how it was
-> measured.
-
 ---
 
 ## Contents
@@ -80,63 +66,53 @@ nothing.
 
 ## Install
 
+[![AUR](https://img.shields.io/aur/version/idlectl?label=AUR&color=1793d1)](https://aur.archlinux.org/packages/idlectl)
+
 ```sh
 paru -S idlectl          # or: yay -S idlectl
 ```
 
-[![AUR](https://img.shields.io/aur/version/idlectl?label=AUR&color=1793d1)](https://aur.archlinux.org/packages/idlectl)
-
-`pacman` cannot fetch this by itself, and that is not an oversight on anyone's part: the AUR holds
-**recipes**, not binaries, so something has to clone the recipe, build it, and hand the result to
-`pacman`. An AUR helper is that something. By hand it is two lines, and `pacman` still does the
-installing:
+The AUR ships recipes rather than binaries, so `pacman` cannot fetch it on its own. By hand:
 
 ```sh
 git clone https://aur.archlinux.org/idlectl.git
-cd idlectl && makepkg -si          # -s pulls build deps, -i calls pacman
+cd idlectl && makepkg -si
 ```
 
-Then enable the two units. The package installs them **disabled**, on purpose — nothing that can
-power a machine off should start doing it because you installed a package:
+Then enable the two units — the package ships them disabled:
 
 ```sh
 sudo systemctl enable --now idlepolicyd.service       # the daemon, one per machine
 systemctl --user enable --now idlectl-agent.service   # the agent, one per graphical session
 ```
 
-Without the agent, `human_active` is *indeterminate* and the daemon **will not let the machine
-sleep** — deliberately: there is a compositor running and nobody can say whether somebody is
-sitting at it.
+⚠️ Without the agent, `human_active` reads *indeterminate* and the daemon **will not let the machine
+sleep**: there is a compositor running and nothing can say whether somebody is sitting at it.
 
-There is nothing to copy to get started. The package installs the vendor policy at
-`/usr/lib/idlectl/idlectl.toml`, which is layer 1 of the config chain and is in effect immediately:
+Nothing to copy. The vendor policy at `/usr/lib/idlectl/idlectl.toml` is in effect immediately:
 
 ```sh
-idlectl doctor                         # what works on this machine, and what does not
-sudoedit /etc/idlectl/idlectl.toml     # layer 2, overrides the vendor file
-idlectl check-config                   # parses and merges without contacting the daemon
+idlectl doctor                         # what works here, and what does not
+sudoedit /etc/idlectl/idlectl.toml     # your layer, overrides the vendor file
+idlectl check-config
 ```
 
 <details>
-<summary><b>Without an AUR helper, or on a machine that is not Arch-based</b></summary>
+<summary><b>No AUR helper, or not an Arch-based distribution</b></summary>
 
 <br>
 
-[`packaging/install.sh`](packaging/install.sh) builds from source and lays down the same file layout
-under `/usr/local`:
+[`packaging/install.sh`](packaging/install.sh) builds from source into `/usr/local`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Eric-Canas/cachyos-idlectl/main/packaging/install.sh | bash
 ```
 
-It is the second-choice route on purpose, and it says so: it refuses to run when an AUR helper is
-present, refuses to install over a `pacman`-owned path, never writes to `/etc` and never enables a
-unit. [`packaging/uninstall.sh`](packaging/uninstall.sh) removes exactly what it added.
+It refuses to run when an AUR helper is present or over a `pacman`-owned path, never writes to
+`/etc` and never enables a unit. [`packaging/uninstall.sh`](packaging/uninstall.sh) removes exactly
+what it added. A packaged install upgrades with the system; this one does not.
 
-A packaged install is owned by `pacman`, upgrades with the system and can be removed completely.
-This one is not, which is fine deliberately and bad by accident.
-
-To build from a checkout instead, see [CONTRIBUTING.md](CONTRIBUTING.md).
+From a checkout: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 </details>
 
@@ -145,10 +121,9 @@ To build from a checkout instead, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 <br>
 
-`makepkg` needs `source` to point at a published tarball plus a checksum. A PKGBUILD kept inside
-the tree it builds is therefore either self-referential or permanently out of date by one release.
-It lives in [Eric-Canas/idlectl-aur](https://github.com/Eric-Canas/idlectl-aur), which mirrors the
-AUR repository. Every comparable project surveyed does the same.
+`makepkg` needs `source` to point at a published tarball plus a checksum, so a PKGBUILD inside the
+tree it builds is either self-referential or one release out of date. It lives in
+[Eric-Canas/idlectl-aur](https://github.com/Eric-Canas/idlectl-aur), mirroring the AUR repository.
 
 </details>
 
@@ -192,14 +167,12 @@ holding this machine awake
 Run `idlectl explain` for the whole computation, or `idlectl doctor` for what is broken.
 ```
 
-The last section only appears when there is something in it. A lease and a held request are the two
-things that can keep a machine awake **without appearing anywhere in your configuration**, so they
-are on the first screen rather than behind a second command.
+A lease and a held request are the only two things that can keep a machine awake **without appearing
+anywhere in your configuration**, so they get their own section — hidden when empty.
 
 ### `idlectl explain` — why, block by block
 
-The question this answers is *"why is my machine not asleep?"*, and it answers it with the numbers
-the decision actually used — not a recomputation ([OBS-2]):
+Answers *"why is my machine not asleep?"* with the numbers the decision actually used:
 
 ```console
 $ idlectl explain suspend
@@ -221,8 +194,7 @@ min_idle  300s
 ```
 
 `held by` is the whole answer: a 150 GB download is running, so `suspend` is `never` until it
-finishes. Note what `explain` does *not* do — there is no "priority" column, because there are no
-priorities. The longest proposal won, and `never` is the longest there is.
+finishes. There is no priority column because there are no priorities — the longest proposal won.
 
 ### `idlectl doctor` — what is broken, and who else thinks they own power
 
@@ -248,9 +220,9 @@ session agents
 screen_off       available
 ```
 
-`doctor` reporting the *other* candidate owners of power is a required output ([OBS-3].11), not a
-best-effort extra: two components each believing they own the suspend decision is the bug this
-project exists to remove, and the symptoms are silent and intermittent.
+`doctor` always names the *other* candidate owners of power ([OBS-3].11). Two components each
+believing they own the suspend decision is the bug this project exists to remove, and it fails
+silently.
 
 ### `idlectl lease` — "I am working, do not sleep"
 
@@ -258,9 +230,9 @@ project exists to remove, and the symptoms are silent and intermittent.
 $ idlectl lease acquire backup --ttl 2h --why "nightly backup" -- ./backup.sh
 ```
 
-The lease lives exactly as long as the command does. It is a **file descriptor**, not a registry
-entry, so a job that crashes cannot pin a machine awake — the kernel closes the handle. The TTL
-(default `1h`, hard maximum `24h`) is the second bound, for a job that survives but hangs.
+The lease lives exactly as long as the command. It is a **file descriptor**, so a job that crashes
+cannot pin the machine awake — the kernel closes it. The TTL (default `1h`, maximum `24h`) covers a
+job that survives but hangs.
 
 ```console
 $ idlectl lease list
