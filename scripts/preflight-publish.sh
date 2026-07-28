@@ -484,8 +484,13 @@ fi
 # Python's expat otherwise; if neither exists the step FAILS rather than passing,
 # because a gate that silently skips is the class of thing this whole script
 # exists to catch.
-step "installed XML parses (polkit actions, bus policy, introspection)"
-xml_files=$(git ls-files 'data/*.xml' 'data/*.conf' 'data/*.policy' 2>/dev/null || true)
+#
+# The SVGs are here for the same reason, and they are here because the identical
+# `--` slipped into a logo comment later: the file served with HTTP 200 and the
+# right content type, and every browser still drew a broken image, because an
+# <img> parses SVG strictly.  The gate covered data/ only, so it passed.
+step "tracked XML parses (polkit actions, bus policy, introspection, logo SVGs)"
+xml_files=$(git ls-files 'data/*.xml' 'data/*.conf' 'data/*.policy' '*.svg' 2>/dev/null || true)
 if [ -z "$xml_files" ]; then
   ok_because "no XML data files are tracked"
 elif command -v xmllint >/dev/null 2>&1; then
