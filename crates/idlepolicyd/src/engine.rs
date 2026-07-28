@@ -532,6 +532,23 @@ impl Engine {
             (d, None) => d,
         };
 
+        // A held request's TTL is a deadline of the same kind, and invisible for the same
+        // reason: while something contributes `never` the resolved deadline is `never` and
+        // nothing is armed, so the request would expire only when an unrelated event
+        // happened to wake the loop.
+        //
+        // Only the expiry needs arming here. Retrying is already covered: whatever holds
+        // the request is a fact, and a fact is either polled -- in which case
+        // `sweep_needed` arms the sweep -- or event-driven, in which case the event pokes
+        // the loop when it changes. What no fact reports is the passage of the TTL itself.
+        let until_deadline = match (until_deadline, self.pending.map(|p| p.expires_at)) {
+            (Some(d), Some(expiry)) => {
+                Some(d.min(expiry.since(now).max(Duration::from_millis(250))))
+            }
+            (None, Some(expiry)) => Some(expiry.since(now).max(Duration::from_millis(250))),
+            (d, None) => d,
+        };
+
         match (until_deadline, self.sweep_needed()) {
             (Some(d), true) => Some(d.min(SWEEP_INTERVAL)),
             (Some(d), false) => Some(d),

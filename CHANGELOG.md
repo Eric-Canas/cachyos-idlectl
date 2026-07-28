@@ -15,6 +15,20 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.4.2] - 2026-07-28
+
+### Fixed
+
+- **A held request's TTL is now armed as a deadline.** While anything contributes `never` the
+  resolved deadline is `never` and no timer is set, so a request held under [REQ-6] could outlive
+  its own TTL and only be noticed when something unrelated happened to wake the loop. This is the
+  same hole the lease TTL already had a line of code for, and the comment next to it says why: a
+  bound the policy engine cannot see has to be armed separately.
+
+  Retrying was never affected: whatever holds a request is a fact, and a fact is either polled --
+  in which case the sweep arms it -- or event-driven, in which case the event pokes the loop. What
+  no fact reports is the passage of the TTL itself.
+
 ## [0.4.1] - 2026-07-28
 
 ### Fixed
