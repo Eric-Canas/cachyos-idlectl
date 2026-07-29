@@ -127,6 +127,20 @@ tree it builds is either self-referential or one release out of date. It lives i
 
 </details>
 
+### If the machine is driven with a gamepad
+
+The agent reads `/dev/input/js*` as well as the compositor, and it has to: `ext-idle-notify-v1`
+resets on what the compositor treats as *seat* input, and libinput does not handle joysticks. On a
+desktop nobody notices, because the keyboard is right there. On a console it is the whole story —
+measured mid-game on a machine whose only input device was a wireless pad, `human_active` read
+**false** while somebody was playing, the panel blanked on schedule, and working the stick did not
+bring it back.
+
+Nothing to configure, and nothing new to permit: a `js` node exists only for a joystick, so the
+agent cannot read a keyboard through this path even by mistake. Where the `joydev` module is absent
+there are no such nodes and the session behaves as it did before. See [HUM-8] and [HUM-9] in the
+specification for what counts as a movement and why an axis needs a deadzone.
+
 ---
 
 ## Usage
@@ -314,7 +328,7 @@ while a capability this machine does not have raises no veto at all.
 
 | fact | true when |
 |---|---|
-| `human_active` | somebody touched the seat within `min_idle` — from the compositor, never a heartbeat |
+| `human_active` | somebody touched the seat within `min_idle` — from the compositor, never a heartbeat, **plus any gamepad** |
 | `after_resume` | the machine came back from sleep recently, counted on the **resume** clock |
 | `remote_session` | an `ssh` or other non-seat session is open |
 | `lease_held` | something took a lease: *"I am working, do not sleep"* |

@@ -15,6 +15,51 @@ interface `io.github.ericcanas.Idlectl1` are the public API and follow SemVer st
 
 Nothing yet.
 
+## [0.6.0] - 2026-07-29
+
+### Added
+
+- **The session agent counts gamepad input** ([HUM-8], [HUM-9]). `ext-idle-notify-v1` resets on what
+  the compositor processes as *seat* input, and libinput does not handle joysticks — so on a machine
+  driven from a sofa, the only input device in the room produces nothing the idle protocol can see.
+
+  Measured mid-game, with a wireless pad as the machine's only input: **38 580 axis events and 54
+  button presses in eight minutes, and `human_active` went `false` while somebody was demonstrably
+  playing.** The panel then blanked on schedule, and 45 seconds of working the stick did not bring it
+  back, because bringing it back needs seat input too. The game platform was calling
+  `org.freedesktop.ScreenSaver.SimulateUserActivity` 1.46 times a second throughout; the compositor
+  does not route that into the idle protocol, so it changed nothing.
+
+  The agent now reads `/dev/input/js*` and feeds the human-input clock from it, **in addition** to
+  what the display server reports. A pad can only ever make the idle time shorter, and it never
+  overrules an unreadable idle clock: a quiet pad is not evidence that a broken protocol recovered.
+
+  Three things this cost, each measured rather than assumed:
+
+  - **An axis needs a deadzone, and it has to be measured from the last *counted* position** — not
+    from the previous event. A stick is swept, not teleported: steering arrives as a long run of
+    small steps, none larger than the deadzone. An implementation comparing consecutive events
+    rejected every noise case and detected no steering whatsoever. A test caught it before the
+    machine did.
+  - **`joydev` silently demotes a slow reader.** A client whose buffer overruns is put back into its
+    initial replay and never sees a real event again. Measured, reading one device every five seconds
+    while a stick swept continuously: five rounds, three synthetic init events each, zero movements.
+    So each pad gets a thread parked in a blocking read, the same shape the daemon uses for a lease
+    handle.
+  - **Waiting for the heartbeat is too slow.** Reporting a first touch on the next heartbeat measured
+    **fifty seconds** from stick to daemon, which as a delay before a dark panel comes back is not a
+    console. A watcher now wakes the agent's loop directly; measured after: **under three seconds**.
+
+  The joystick interface was chosen over `evdev` for two reasons. It reports axes already normalised
+  to `-32767..=32767`, where `evdev` needs an `EVIOCGABS` ioctl per axis — and this crate is
+  `#![forbid(unsafe_code)]`, which an ioctl cannot honour. And the interface *is* the permission
+  boundary: a `js` node exists only for a joystick, so this code cannot read a keyboard even by
+  mistake. On the receiver measured here, the pad's keyboard and mouse interfaces — separate devices
+  on the same USB dongle — have no `js` node at all.
+
+  Where `joydev` is absent there are no `js` nodes, no pads are watched, and a session behaves
+  exactly as it did before.
+
 ## [0.5.2] - 2026-07-28
 
 ### Fixed

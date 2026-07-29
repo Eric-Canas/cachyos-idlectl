@@ -903,6 +903,39 @@ origin(human_input)` and `min_idle` is `[general] min_idle`, default 5 minutes.
 be FALSE. *(Rationale: preserves the remote relay fast path of [CLK-7]. A machine nobody has ever
 touched has no human on it, and must be allowed to finish its job and go back to sleep.)*
 
+**[HUM-8] — a gamepad is input, and the display server will not say so.** Where a session agent
+can read joystick devices, it MUST feed the human-input clock from them, and it MUST do so in
+addition to what the display server reports rather than instead of it. A pad's observation MAY only
+make `human_idle` **shorter**; it MUST NOT lengthen it, and it MUST NOT overrule an unreadable idle
+clock ([HUM-4]) — a quiet pad is not evidence that a broken idle protocol recovered.
+
+Rationale: `ext-idle-notify-v1` resets on what the compositor processes as *seat* input, and
+libinput does not handle joysticks. On a desktop this is invisible because the keyboard is next to
+the pad. On a machine driven from a sofa it is total, and it inverts the meaning of the fact:
+*(measured, mid-game, on a machine whose only input device is a wireless pad — 38 580 axis events
+and 54 button presses in eight minutes, `human_active` **false** while somebody was demonstrably
+playing, the panel blanked on schedule, and 45 seconds of working the stick did not bring it back,
+because bringing it back needs seat input too. The game platform was calling
+`org.freedesktop.ScreenSaver.SimulateUserActivity` 1.46 times a second throughout and the
+compositor does not route that into the idle protocol, so it changed nothing.)*
+
+**[HUM-9] — an axis needs a deadzone; a button does not.** An implementation of [HUM-8] MUST NOT
+treat every axis event as input. It MUST require a movement to exceed a threshold measured from the
+axis's **last counted position** — not from the previous event — and that threshold MUST be derived
+from the axis's own range rather than fixed in raw counts.
+
+Both halves are load-bearing, and they fail in opposite directions.
+
+The *deadzone* exists because the interface is edge-triggered: a stick resting off-centre is
+silent, but a worn one emits a change forever, and counting those pins a machine awake with nobody
+in the room — on an OLED panel, holding a static image until morning.
+
+*Measuring from the last counted position* exists because a stick is swept, not teleported.
+Steering arrives as a long run of small steps, none of them larger than the deadzone; compared
+against the previous event, nothing ever exceeds it and the detector is blind to exactly the input
+it was built for. *(Caught by a test written before the code was believed: an implementation that
+advanced the baseline on every event passed every noise case and detected no steering at all.)*
+
 **[HUM-4]** When the human-input clock is **unreadable** — the session agent is not running, its
 heartbeat is stale, or the idle protocol errors — `human_active` MUST be `INDETERMINATE`.
 
@@ -2268,6 +2301,7 @@ for removal, the measurement is the thing to re-run first.
 | [OBS-8] | A screen state nobody ever reads back, on a daemon that by design does not re-issue an action it believes is already in effect. |
 | [CFG-28] | A broken package leaving a panel lit, on a first start with no previous configuration to keep. |
 | [OBS-3].11 | Two owners of power, neither aware of the other (§13.3). |
+| [HUM-8], [HUM-9] | `human_active` reading FALSE while somebody played, on a machine whose only input device no display server reports — and the OLED panel that blanked in their face because of it. |
 | [FACT-13b] | A machine held awake by a lease that named no holder — and the bystander an unqualified pid would have pointed at. |
 | [FACT-11] | `delay` locks read as vetoes, making the fact permanently true. |
 | [FACT-12], §13.2 | An inhibitor design that cannot see a 150 GB download. |

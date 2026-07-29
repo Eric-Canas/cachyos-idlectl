@@ -55,6 +55,7 @@
 
 mod backend;
 mod clock;
+mod gamepad;
 mod gpu;
 mod lastinput;
 mod mpris;
@@ -290,9 +291,18 @@ async fn serve(backend: Arc<dyn Backend>) -> Result<()> {
     // half a minute after the agent did.
     let mut announced_can_blank = backend.can_blank();
 
+    // Gamepads are watched here and not in the daemon because this is the session-scoped
+    // half: the devices carry a per-seat ACL, and which seat they belong to is exactly what
+    // an agent knows and a machine-wide daemon does not.
+    let mut gamepads = gamepad::Gamepads::new();
+    let pad_touched = gamepads.woken();
+
     let mut last_state: Option<bool> = None;
     loop {
-        let idle = backend.idle();
+        // Merged, not replaced: the compositor remains the authority on the seat, and the
+        // pad can only ever say "more recently than that". See `gamepad` for why a device
+        // no display server reports has to be read directly at all.
+        let idle = gamepads.merge(backend.idle());
         // Before the report, not after: if this process is about to be replaced by a
         // package upgrade, what matters is that the successor finds the instant that was
         // true when this one last looked.
@@ -354,7 +364,19 @@ async fn serve(backend: Arc<dyn Backend>) -> Result<()> {
             Idle::For(d) if d < Duration::from_secs(60) => interval.min(Duration::from_secs(5)),
             _ => interval,
         };
-        async_io::Timer::after(wait).await;
+        // The heartbeat, or a pad being picked up, whichever comes first. Without the second
+        // branch the first touch after a quiet spell waits for the whole interval: measured at
+        // fifty seconds from the stick moving to the daemon knowing, which as a delay before a
+        // dark panel comes back is not a console.
+        futures_lite::future::or(
+            async {
+                async_io::Timer::after(wait).await;
+            },
+            async {
+                let _ = pad_touched.recv().await;
+            },
+        )
+        .await;
     }
 }
 
